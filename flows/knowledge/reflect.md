@@ -77,7 +77,7 @@ For each section (Episodic, Semantic, Procedural):
 **Objective:** Repair weak structure and surface gaps.
 
 1. **Orphan nodes** — nodes with no incoming or outgoing links. Read and identify what they should link to; propose link additions.
-2. **Broken wikilinks** — `[[Title]]` references that don't resolve to a node. Propose either creating the missing node or correcting the link. For procedural targets, verify the `aliases` frontmatter field is present (procedural files are `SKILL.md` and resolve via alias).
+2. **Broken wikilinks** — `[[Title]]` references that don't resolve to a node. Propose either creating the missing node or correcting the link. A link resolves only if its target is a real file name or vault path: a procedural linked by directory name alone (`[[draft-youtube-storyboard]]`) or a node linked by one of its `aliases` is broken; rewrite it to the forms in `refs/knowledge/nodes.md` § Links. Match names Unicode-normalized (NFC): accented file names may be stored decomposed on disk.
 3. **Stale nodes** — nodes not updated in a long time but referenced in recent episodic content. Surface for review.
 4. **Gaps** — entities mentioned across multiple episodes but never given semantic depth. Propose enrichment.
 5. **Procedural symlink currency** — if bootstrap (per `BOOTSTRAP.md`) is in use on this environment, verify each `Memory/Procedural/<name>/` directory has corresponding symlinks in the configured harness skill paths. New procedurals since last bootstrap run, or removed/renamed procedurals, may have stale or missing symlinks. Surface what needs a re-run; do not run bootstrap from inside reflect.

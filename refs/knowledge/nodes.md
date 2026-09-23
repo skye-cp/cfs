@@ -37,7 +37,7 @@ YAML frontmatter at the top of every node. Minimal required floor; type-specific
 |---|---|---|
 | `name` | string | Skill identifier; matches the directory name (lowercase, hyphenated) |
 | `description` | string | Per agentskills.io — concise statement of what the skill does and when to use it |
-| `aliases` | list of strings | Must include the skill's directory name (e.g., `[draft-youtube-storyboard]`) so Obsidian wikilinks resolve to the right `SKILL.md`. Required because the file is named `SKILL.md` for skill-loader compatibility, not the skill name. |
+| `aliases` | list of strings | Must include the skill's directory name (e.g., `[draft-youtube-storyboard]`), because the file is named `SKILL.md` for skill-loader compatibility, not the skill name; the alias keeps the skill findable by name in search and recall. Wikilinks target the path (see § Links). |
 
 ### Recommended (all types)
 
@@ -125,11 +125,15 @@ Two link types, used by audience:
 
 ### Knowledge ↔ knowledge
 
-Obsidian wikilinks: `[[Title]]`. Resolution is by filename (without `.md`).
+Obsidian wikilinks, resolved by file name (without `.md`) or by vault path. Obsidian does not resolve links through `aliases`, and clicking a link with no matching file creates an empty note at the vault root, so every link names a real file:
+
+- **Semantic and episodic** — `[[Title]]`, where `Title` is the node's exact file name. To show other text, keep the file name as the target and put the text after `|`: `[[John Doe Smith|John]]`.
+- **Procedural** — every procedural's file is `SKILL.md`, so the target is the vault path and the skill name is the display text: `[[Procedural/draft-youtube-storyboard/SKILL|draft-youtube-storyboard]]`.
+- **Inside a markdown table**, escape the separator: `[[John Doe Smith\|John]]`.
 
 ```markdown
 Worked with [[John Doe Smith]] on the [[Acme Corp]] migration.
-See [[draft-youtube-storyboard]] for the template used.
+See [[Procedural/draft-youtube-storyboard/SKILL|draft-youtube-storyboard]] for the template used.
 ```
 
 ### Knowledge ↔ external sources

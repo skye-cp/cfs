@@ -115,7 +115,7 @@ Actions:
 2. **Episodic** — `2026-04-26-1545 - Defined YouTube Storyboard Template.md`. Brief narrative + the context for why the template was defined.
 3. **Semantic** — none (no nameable thing introduced beyond the procedural).
 4. **Procedural** — create `Memory/Procedural/draft-youtube-storyboard/SKILL.md`. Skill-format frontmatter (`name`, `description`, `title`, `aliases: [draft-youtube-storyboard]`); body contains the template steps.
-5. **Verify** — episodic links to the new procedural via `[[draft-youtube-storyboard]]` (resolves through the alias). If bootstrap is in use, mention re-running it to expose this new skill to other harnesses.
+5. **Verify** — episodic links to the new procedural via `[[Procedural/draft-youtube-storyboard/SKILL|draft-youtube-storyboard]]` (see `refs/knowledge/nodes.md` § Links). If bootstrap is in use, mention re-running it to expose this new skill to other harnesses.
 
 Result: episodic + procedural; future agents can load the procedural as a skill directly from any harness with the bootstrapped symlinks.
 

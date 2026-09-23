@@ -38,7 +38,7 @@ Retrieves knowledge content relevant to a query, topic, entity, or task context.
 **Objective:** Read matching nodes from the knowledge layer.
 
 1. Determine likely subdirs to scan based on the query — `Episodic/`, `Semantic/`, `Procedural/`, or all.
-2. If an entity is named, check semantic first (most direct hit); follow links from there to related episodic and procedural nodes. Wikilinks like `[[draft-youtube-storyboard]]` resolve to procedural via the `aliases` frontmatter field (the file itself is `SKILL.md` inside the matching directory).
+2. If an entity is named, check semantic first (most direct hit); follow links from there to related episodic and procedural nodes. Procedural wikilinks target the skill's path, `[[Procedural/draft-youtube-storyboard/SKILL|draft-youtube-storyboard]]` (the file is `SKILL.md` inside the skill's directory).
 3. If a timeframe is given, narrow episodic by date prefix.
 4. If a how-to is needed, search procedural — each procedural is a `<skill-name>/SKILL.md` directory; the directory name is the skill identifier.
 5. Use whatever capability is available to read and search the markdown vault — agent-native is usually sufficient; bundled vault tools are optional (see `tools/`).

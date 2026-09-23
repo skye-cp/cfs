@@ -65,6 +65,6 @@ Filenames must be unique within their type's folder (Obsidian resolves wikilinks
 
 - **Episodic** — disambiguate via the time component (e.g., `1300` vs `1430` on the same date).
 - **Semantic** — add the qualifying detail that distinguishes the entity; update the existing under-qualified node's name if needed.
-- **Procedural** — refine the action to be more specific. Note: every procedural's file is `SKILL.md`; uniqueness is by directory name + the `aliases` frontmatter field, which Obsidian uses to resolve wikilinks like `[[draft-youtube-storyboard]]` to the right `SKILL.md`.
+- **Procedural** — refine the action to be more specific. Note: every procedural's file is `SKILL.md`, so uniqueness is by directory name (repeated in the `aliases` frontmatter field), and wikilinks target the path: `[[Procedural/draft-youtube-storyboard/SKILL|draft-youtube-storyboard]]` (see `nodes.md` § Links).
 
 Renames of existing nodes are reflect's job — encode flags collisions via todo rather than overwriting.
