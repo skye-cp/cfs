@@ -1,3 +1,8 @@
+# SKai pre-commit baseline — reference: apply-repo-standards § Pre-commit baseline.
+# Install once per clone:  pre-commit install   (arms pre-commit, commit-msg, pre-push)
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+default_stages: [pre-commit]
+
 repos:
   # -- General hygiene --
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -9,6 +14,27 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ['--maxkb=500']
+      - id: mixed-line-ending
+      - id: check-case-conflict
+      - id: detect-private-key
+      - id: detect-aws-credentials
+        args: [--allow-missing-credentials]
+
+  # -- Repo guards --
+  - repo: local
+    hooks:
+      - id: main-via-merge-only
+        name: Block direct commits to main (branch, then merge)
+        language: system
+        entry: sh -c 'test "$(git branch --show-current)" != main || test -f "$(git rev-parse --git-dir)/MERGE_HEAD" || git diff --cached --quiet || { echo "main takes merges only - commit on a branch, then git merge --no-ff"; exit 1; }'
+        pass_filenames: false
+        always_run: true
+      - id: block-env-files
+        name: Block .env files (.env.example is fine)
+        language: fail
+        entry: .env files hold secrets and are never committed
+        files: '(^|/)\.env(\.[^/]*)?$'
+        exclude: '(^|/)\.env\.example$'
 
   # -- Secrets detection --
   # detect-secrets — incumbent. Kept for the .secrets.baseline allowlist
@@ -18,7 +44,8 @@ repos:
     rev: v1.5.0
     hooks:
       - id: detect-secrets
-        args: ['--baseline', '.secrets.baseline']
+        args: ['--baseline', '.config/secrets.baseline']
+        exclude: ^\.config/secrets\.baseline$
 
   # gitleaks — primary secrets engine. Broader detector set, composite
   # rules for proximity-keyed PII identifiers (used later for BR/IT/JP
@@ -27,6 +54,16 @@ repos:
     rev: v8.30.1
     hooks:
       - id: gitleaks
+        args: [-c, .config/gitleaks.toml, -i, .config/gitleaksignore]
+  - repo: local
+    hooks:
+      - id: gitleaks-push
+        name: Scan pushed commits for secrets
+        language: system
+        entry: sh -c 'gitleaks git --no-banner --redact -c .config/gitleaks.toml -i .config/gitleaksignore --log-opts="${PRE_COMMIT_TO_REF:-HEAD} --not --remotes"'
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
 
   # -- PII detection (structured patterns) --
   - repo: local
@@ -58,8 +95,25 @@ repos:
     rev: v0.11.11
     hooks:
       - id: ruff
-        args: ['--fix']
+        args: ['--fix', '--extend-select=S']
       - id: ruff-format
+
+  # -- Shell --
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+
+  # -- GitHub workflows --
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+  - repo: https://github.com/woodruffw/zizmor-pre-commit
+    rev: v1.30.1
+    hooks:
+      - id: zizmor
+        language_version: python3.12
 
   # -- Commit message convention --
   - repo: https://github.com/compilerla/conventional-pre-commit

@@ -1,0 +1,7 @@
+# gitleaks: default rules, plus the allowlist below.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "detect-secrets baseline holds irreversible hashes, not secrets"
+paths = ['''^\.config/secrets\.baseline$''', '''^\.secrets\.baseline$''']  # current + pre-2026-09-25 location
