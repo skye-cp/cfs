@@ -38,7 +38,7 @@ PATTERNS = {
 
 # Files/paths the hook should not scan.
 SKIP_PATTERNS = [
-    r"\.secrets\.baseline$",
+    r"(^|/)\.?secrets\.baseline$",
     r"dev/check_pii\.py$",
     r"dev/pii_wordlist\.example\.txt$",
     r"bak/",
