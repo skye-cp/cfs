@@ -1051,15 +1051,15 @@ def _get_drivefs_item_id(path: str) -> str | None:
     import subprocess
 
     try:
-        result = subprocess.run(
-            ["xattr", "-p", "com.google.drivefs.item-id#S", path],
+        result = subprocess.run(  # noqa: S603 — fixed argv
+            ["xattr", "-p", "com.google.drivefs.item-id#S", path],  # noqa: S607 — macOS system tool
             capture_output=True,
             text=True,
             check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except Exception:
+    except Exception:  # noqa: S110 — best-effort lookup; None is the fallback
         pass
     return None
 
