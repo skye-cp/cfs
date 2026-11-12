@@ -155,20 +155,27 @@ knowledge:
 # knowledge). External sources are never mutated by CFS; the source-protection
 # rule in refs/admin/safety.md applies.
 #
-# Each entry is a name and an address. Names are user-chosen, lowercase-
-# hyphenated (system-internal handles, like backend names). Addresses use the
-# same scheme syntax as elsewhere — `<backend>:<path>` for filesystem
-# locations, or service-specific schemes:
+# Shape mirrors `backends:`. Each entry is a user-chosen, lowercase-hyphenated
+# name (a system-internal handle, like backend names) with:
 #
-#   - `<backend>:<path>`              — filesystem capability per `backends:`
-#   - `email:[<account>]`             — email capability (MCP / IMAP / native)
-#   - `calendar:[<calendar-id>]`      — calendar capability (CalDAV / MCP)
-#   - `<app>:<id>`                    — service-specific MCP or API
-#                                       (notion, slack, figma, etc.)
+#   - `type`     — what the source is: email | calendar | chat | teams |
+#                  whatsapp | folder | … (user/community-extensible)
+#   - `account`  — optional; the identity, where the source is one
+#   - `access`   — map keyed by backend name, or `any` for capabilities bound
+#                  to the harness login rather than a machine. Each value is
+#                  either a storage address (`<backend>:<path>`, for
+#                  filesystem sources) or a capability:
+#                    procedural:<skill>   connector:<name>
+#                    mcp:<server>         cli:<tool>
+#                  optionally followed by `#<locator>`, a selector the
+#                  capability itself defines
+#                  (e.g. `procedural:operate-agent-chrome#<instance>/<app>`).
 #
-# Schemes are user/community-extensible; CFS does not enumerate exhaustively.
-# If the agent has no capability for a source's scheme, it surfaces the
-# reference and continues — sources fail gracefully.
+# A source with no access entry for the active backend is inert there — flows
+# soft-skip it. When the agent has no capability for a value, it surfaces the
+# reference and continues; sources fail gracefully. On reading a source the
+# agent loads the named capability, follows its recipes and passes it the
+# locator.
 #
 # Sources may also be referenced ad-hoc (e.g., "process laptop_a:Downloads");
 # defining them here is for repeated, named use. Source-specific
@@ -178,10 +185,19 @@ knowledge:
 #
 # Example:
 #   sources:
-#     downloads: laptop_a:Downloads
-#     phone-photos: gdrive:Camera Uploads
-#     work-email: email:you@work.example  # pii:allow
-#     personal-calendar: calendar:
-#     team-slack: slack:my-team
+#     downloads:
+#       type: folder
+#       access:
+#         laptop_a: laptop_a:Downloads
+#     work-email:
+#       type: email
+#       account: you@work.example  # pii:allow
+#       access:
+#         any: connector:Gmail
+#         laptop_a: procedural:operate-agent-chrome#work/gmail
+#     team-chat:
+#       type: chat
+#       access:
+#         laptop_a: procedural:operate-agent-chrome#work/slack
 
 # sources:
