@@ -37,7 +37,7 @@ Initializes or verifies a CFS environment: configuration, storage scaffolding, a
 3. Inspect host signals (`hostname` / `uname -n`, `scutil --get LocalHostName`, `scutil --get ComputerName`, etc.) and propose a local backend declaration for this machine — a lowercase identifier-safe name plus a `match:` block of the inspected fields. Confirm the proposed name with the user; write the `type: local` backend entry to `backends:`. See `refs/admin/addressing.md` for the grammar. (Skip in environments with no local filesystem to declare — pure cloud workers.)
 4. Prompt the user to decide:
    - Which layers to activate (`storage.active`, `knowledge.active`). At least one must be active.
-   - Any remote backends to declare under `backends:` (gdrive, etc.). See `config.example.yaml` for the shape and `refs/admin/addressing.md` for the grammar. If a remote backend has a local sync mount on this machine, declare a `mirrors:` entry keyed to the local backend from the previous sub-step.
+   - Any remote backends to declare under `backends:` (gdrive, etc.). See `config.example.yaml` for the shape and `refs/admin/addressing.md` for the grammar. If a remote backend has a local sync mount on this machine, declare a `mirrors:` entry keyed to the local backend from the previous sub-step. A mount that writes through the backend's own API (e.g. rclone) may be declared writable (`{ path: ..., writable: true }`); a desktop sync client's folder stays a plain, read-only path.
    - Storage addresses (Archive, Library, Projects, Unsorted) — only if storage layer is active.
    - Knowledge address (Memory) — only if knowledge layer is active.
    - Admin address — always required regardless of layer activation.

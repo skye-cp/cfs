@@ -43,9 +43,13 @@ language: en
 #
 # - Remote (`type: gdrive`, etc.) — a service the agent reaches via API/MCP/CLI.
 #                            Active wherever the agent has the capability.
-#                            May declare a `mirrors:` map of per-machine sync
-#                            paths used for reads only — mutations always go
-#                            through the backend's API
+#                            May declare a `mirrors:` map of per-machine local
+#                            paths. A path entry is read-only; mutations go
+#                            through the backend's API. An entry
+#                            `{ path: ..., writable: true }` also takes
+#                            mutations, and is only for mounts that write
+#                            through the backend's API (e.g. rclone), never a
+#                            desktop sync client
 #                            (see refs/admin/safety.md § Backend dispatch).
 #
 # Recognized `match:` fields: hostname, local_hostname, computer_name,
@@ -63,6 +67,7 @@ language: en
 #       account: you@example.com  # pii:allow
 #       mirrors:
 #         laptop_a: ~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive  # pii:allow
+#         server_c: { path: ~/gdrive, writable: true }   # rclone mount
 
 backends:
 

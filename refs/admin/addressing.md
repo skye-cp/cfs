@@ -66,7 +66,7 @@ The set is extensible — additional fields may be added as new platforms surfac
 
 Declared with a backend-specific type (currently `gdrive`) plus type-specific fields. No `match:` block — a remote backend is active wherever the agent has a capability for it.
 
-A remote backend may declare a `mirrors:` map — per-machine local sync paths the agent may use **for reads only**:
+A remote backend may declare a `mirrors:` map — per-machine local paths that surface its content. An entry is either a path (a **read-only** mirror) or a mapping with `path` and `writable: true` (a **writable** mirror):
 
 ```yaml
 backends:
@@ -76,9 +76,10 @@ backends:
     mirrors:
       laptop_a: ~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive  # pii:allow
       laptop_b: ~/gdrive
+      server_c: { path: ~/gdrive, writable: true }   # mount that writes through the backend's API (e.g. rclone)
 ```
 
-Mirror semantics are governed by `refs/admin/safety.md` § Backend dispatch — reads may use the mirror, mutations always go through the backend's API. The agent uses the mirror entry whose key matches the active local backend; if no key matches, dispatch is API-only.
+Mirror semantics are governed by `refs/admin/safety.md` § Backend dispatch — reads may use any mirror; mutations go through the backend's API, directly or through a writable mirror. The agent uses the mirror entry whose key matches the active local backend (its `path` when the entry is a mapping); if no key matches, dispatch is API-only.
 
 ## Active-backend determination
 
@@ -174,9 +175,9 @@ backends:
     account: you@example.com  # pii:allow
     mirrors:
       laptop_a: ~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive  # pii:allow
-      laptop_b: ~/gdrive
+      laptop_b: { path: ~/gdrive, writable: true }
 ```
 
 - Session on `laptop_a`: `laptop_a:` and `gdrive:` active; `laptop_b:` inert.
-- Session on `laptop_b`: `laptop_b:` and `gdrive:` active; `laptop_a:` inert.
+- Session on `laptop_b`: `laptop_b:` and `gdrive:` active; `laptop_a:` inert. Its mirror is writable, so mutations may go through `~/gdrive` as well as the API.
 - Cloud session: `gdrive:` active via API; both local backends inert.

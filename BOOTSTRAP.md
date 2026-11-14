@@ -102,7 +102,7 @@ Exposes user-defined procedural skills (`Memory/Procedural/<skill-name>/`) to ev
 
 For each procedural directory in `Memory/Procedural/`:
 
-1. Resolve the procedural's local path. If Memory is on a remote backend, use the mirror entry whose key matches the active local backend to resolve to the local sync path.
+1. Resolve the procedural's local path. If Memory is on a remote backend, use the mirror entry whose key matches the active local backend to resolve to the local path (the entry's `path` when it is a mapping).
 2. For each known harness skill path that exists:
    - If a symlink with the same name already exists, check whether it points at the current procedural directory. If stale, replace.
    - Create a symlink: `<harness-path>/<skill-name>/` → `<procedural-local-path>/<skill-name>/`.
