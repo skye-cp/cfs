@@ -174,7 +174,7 @@ knowledge:
 #                    mcp:<server>         cli:<tool>
 #                  optionally followed by `#<locator>`, a selector the
 #                  capability itself defines
-#                  (e.g. `procedural:operate-agent-chrome#<instance>/<app>`).
+#                  (e.g. `procedural:<reader-skill>#<locator>`).
 #
 # A source with no access entry for the active backend is inert there — flows
 # soft-skip it. When the agent has no capability for a value, it surfaces the
@@ -199,10 +199,10 @@ knowledge:
 #       account: you@work.example  # pii:allow
 #       access:
 #         any: connector:Gmail
-#         laptop_a: procedural:operate-agent-chrome#work/gmail
+#         laptop_a: procedural:<reader-skill>#work/gmail
 #     team-chat:
 #       type: chat
 #       access:
-#         laptop_a: procedural:operate-agent-chrome#work/slack
+#         laptop_a: procedural:<reader-skill>#work/slack
 
 # sources:
