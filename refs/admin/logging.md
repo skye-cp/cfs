@@ -121,7 +121,12 @@ Free-form markdown with AI judgment. Always include:
 - **Affected items** — paths to relevant files
 - **Suggested next steps** — what to do about it
 
-Update the content as the todo progresses — add resolution notes, decisions made, actions taken.
+When it applies, also include, as header lines next to `Created:` and `Source:`:
+
+- **Owner** — who acts on the todo: a person, or an agent by its name. One owner.
+- **Waiting on** — who the todo waits on, when that is not the owner.
+
+Update the content as the todo progresses — add resolution notes, decisions made, actions taken. A change of owner or of who it waits on updates those lines.
 
 ### Example todo
 
@@ -130,6 +135,7 @@ Update the content as the todo progresses — add resolution notes, decisions ma
 
 Created: 2024-10-31T14:30
 Source: file flow (flows/storage/file.md)
+Owner: user
 
 ## Description
 

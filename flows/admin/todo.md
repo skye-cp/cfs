@@ -27,6 +27,7 @@ When already inside another flow's execution, that flow's "create a todo" instru
 - **Reference** (update/close) — path, filename, or descriptive title locating the existing todo.
 - **Layer** — `storage`, `knowledge`, or `admin`. Required for create; inferred from the existing todo's path for update/close.
 - **Body content** (create) — description, affected items, suggested next steps, per `refs/admin/logging.md`.
+- **Owner** and **Waiting on** (create, update; optional) — per `refs/admin/logging.md` § Todos.
 - **Update content** (update) — what to append or refine.
 - **Resolution** (close) — what was done OR why the todo is no longer relevant.
 
@@ -62,7 +63,7 @@ When already inside another flow's execution, that flow's "create a todo" instru
 **Objective:** Append to or refine an existing pending todo without changing its status.
 
 1. Read the existing todo.
-2. Apply the update — typically appending dated notes, refining the Description or Affected items, or revising Suggested next steps as understanding evolves.
+2. Apply the update — typically appending dated notes, refining the Description or Affected items, revising Suggested next steps as understanding evolves, or changing the Owner or Waiting on line.
 3. Do not rename the file. Status remains `pending`.
 4. Write and verify.
 
