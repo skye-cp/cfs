@@ -7,21 +7,27 @@ a mount can serve a stale listing or a body cut to a stale size.
 
 Subcommands print one JSON line on success. A guard failure exits 2 with
 REFUSED: on stderr; a guard that fails before the upload leaves the remote
-untouched. Exit 3 with CONFLICT: means that after our upload the remote held
-another writer's content: it is left as it is (never rolled back over).
+untouched. Exit 3 with CONFLICT: means another writer got in the way and
+everything is left as it is (never rolled back over): after our upload the
+remote held its content, a --create left a same-name twin, or append ran out
+of retries (its lines are not in the log).
 
   read REMOTE LOCAL [--state STATE]   rclone cat into LOCAL; STATE records
                                       id/size/md5/modtime for a later write
   write LOCAL REMOTE (--base STATE | --expect-md5 MD5 | --create)
                                       validate, compare-and-swap, copyto,
                                       verify; roll back only our own bad upload
-  append FRAGMENT REMOTE [--create]   read via the API, append, guarded write;
-                                      re-read and retry on a concurrent change
+  append FRAGMENT REMOTE [--create] [--settle S]
+                                      read via the API, append, guarded write;
+                                      re-read and retry on a concurrent change;
+                                      after S seconds check ours is still there
   moveto SRC DST                      rename one object; refuse if DST exists
   trash REMOTE [--id ID]              move one object to Drive trash and
                                       confirm it in the trash listing
-  restore REMOTE_DIR --id ID          bring a trashed object back under its
-                                      name (strips the .cfs-trash-<ID> suffix)
+  restore REMOTE_DIR --id ID [--name NEW]
+                                      bring a trashed object back under its name
+                                      (strips .cfs-trash-<ID>) or NEW; refuses,
+                                      moving nothing, if that name is taken
   lsjson REMOTE_DIR                   authoritative listing; refuse on
                                       same-name duplicates
 
@@ -58,7 +64,19 @@ class Changed(Refused):
 
 
 class Conflict(Refused):
-    """After our upload the remote held another writer's content; left as is."""
+    """After our upload the remote held another writer's content; left as is.
+
+    `uploaded` holds the exact bytes of our upload and `upload_ok` whether rclone
+    reported that upload as done (exit 0), so `append` can tell whether its own
+    upload landed before someone else appended to it.
+    """
+
+    def __init__(
+        self, msg: str, uploaded: bytes | None = None, upload_ok: bool = False
+    ):
+        super().__init__(msg)
+        self.uploaded = uploaded
+        self.upload_ok = upload_ok
 
 
 def run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -202,8 +220,10 @@ def parse_time(value: str | None) -> float | None:
     v = value.replace("Z", "+00:00")
     head, sep, frac = v.partition(".")
     if sep:
-        digits = "".join(c for c in frac if c.isdigit())
-        tz = frac[len(digits) :]
+        n = 0
+        while n < len(frac) and frac[n].isdigit():
+            n += 1
+        digits, tz = frac[:n], frac[n:]  # only the fraction; keep the zone
         v = f"{head}.{digits[:6].ljust(6, '0')}{tz}"
     try:
         return datetime.fromisoformat(v).timestamp()
@@ -337,6 +357,15 @@ def write_core(
         if pre_path
         else "new file, no pre-image"
     )
+    ok_up = up.returncode == 0
+    if len(after) > 1 and create:
+        raise Conflict(
+            f"{remote}: --create, but after the upload the name has {len(after)} objects "
+            f"{[r.get('ID') for r in after]}: another writer created it at the same time. "
+            "Nothing removed; merge the twins (read both by ID) and trash one with `trash --id`",
+            uploaded=data,
+            upload_ok=ok_up,
+        )
     if len(after) > 1:
         raise Refused(f"{remote}: {problem}; NOT rolled back (duplicate names); {keep}")
     if not after:
@@ -350,7 +379,9 @@ def write_core(
         raise Conflict(
             f"{remote}: {problem}; the remote now holds {row['Size']} B {md5_of(row)} "
             f"(modtime {row.get('ModTime')}), which is neither this upload nor the pre-image: "
-            f"another writer's edit. NOT rolled back; {keep}; re-read and redo the edit"
+            f"another writer's edit. NOT rolled back; {keep}; re-read and redo the edit",
+            uploaded=data,
+            upload_ok=ok_up,
         )
     if cur is None or pre_path is None:
         raise Refused(
@@ -359,7 +390,9 @@ def write_core(
     # Compare-and-swap before the rollback too: only replace our own upload.
     if state_of(one_file(objects(remote), remote)) != state_of(row):
         raise Conflict(
-            f"{remote}: {problem}; changed again before rollback; NOT rolled back; {keep}"
+            f"{remote}: {problem}; changed again before rollback; NOT rolled back; {keep}",
+            uploaded=data,
+            upload_ok=ok_up,
         )
     rb = copyto(str(pre_path), remote)
     chk = objects(remote)
@@ -404,6 +437,42 @@ def read_state(remote: str) -> tuple[bytes, dict] | None:
     return data, st
 
 
+def still_mine(remote: str, new: bytes, mtime: float, wait: float) -> bool:
+    """After WAIT seconds, does the log still hold our upload?
+
+    It must start with the exact bytes we uploaded. If it is exactly those bytes,
+    the modtime must also be the one we set (to the millisecond): another writer
+    that appended a byte-identical line to the same base and uploaded after us
+    leaves the same bytes but its own modtime, and our line would be lost.
+    """
+    if wait > 0:
+        time.sleep(wait)
+    for _ in range(5):
+        try:
+            now = read_state(remote)
+            break
+        except Changed:
+            time.sleep(0.5)
+    else:
+        return (
+            True  # still busy: later writers build on what they read; theirs check too
+        )
+    if now is None or not now[0].startswith(new):
+        return False
+    if len(now[0]) > len(new):
+        return True  # someone appended after our upload
+    t = parse_time(now[1]["modtime"])
+    if t is None or abs(t - mtime) > 120:
+        # A concurrent writer uploads within seconds of us; a modtime this far off
+        # means we cannot judge identity. Appending again could duplicate the lines.
+        raise Refused(
+            f"{remote} holds exactly our upload, but its modtime {now[1]['modtime']} "
+            f"is not near ours ({mtime}); cannot tell whether it is ours. "
+            "Not appending again: the lines are probably in the log, check it"
+        )
+    return abs(t - mtime) < 0.002
+
+
 def check_growth(remote: str, seen: int, size: int) -> int:
     if size < seen:
         raise Refused(
@@ -420,6 +489,7 @@ def cmd_append(
     text: bool,
     retries: int,
     preimage_dir: str | None,
+    settle: float = 0.0,
 ) -> int:
     frag = Path(fragment).read_bytes()
     # the fragment must be clean text; the type check uses the remote's name
@@ -453,7 +523,7 @@ def cmd_append(
                     new = body + frag
                 up = work / split(remote)[1]
                 up.write_bytes(new)
-                mtime = time.time()
+                mtime = round(time.time(), 3)  # Drive keeps modtimes to the millisecond
                 os.utime(up, (mtime, mtime))
                 res = write_core(
                     new,
@@ -466,30 +536,52 @@ def cmd_append(
                     False,
                     preimage_dir,
                 )
+                if not still_mine(remote, new, mtime, settle):
+                    # Our upload was overwritten after our post-write check by a writer
+                    # that read the log before our upload: append again on top of theirs.
+                    last = f"{remote}: our upload was overwritten within {settle:g} s"
+                    continue
                 return emit({**res, "appended": len(frag), "attempts": attempt})
-            except (Changed, Conflict) as e:
+            except Changed as e:
+                # Nothing was uploaded: re-read and append again. Never treat matching
+                # text from another writer as ours.
                 last = str(e)
-                # Our upload may have landed and been appended to since: done if so.
+                continue
+            except Conflict as e:
+                if base is None:
+                    raise  # --create made a same-name twin: someone must merge them
+                last = str(e)
+                # Our own upload may have landed and been appended to since. Count it only
+                # if rclone confirmed our upload and the log now starts with exactly the
+                # bytes we uploaded (our CAS'd base plus our fragment), then grew.
                 try:
                     now = read_state(remote)
                 except Changed:
                     now = None
                 if now is not None:
                     seen = check_growth(remote, seen, len(now[0]))
-                if now is not None and now[0].startswith(body + frag):
+                mine = e.uploaded
+                if (
+                    now is not None
+                    and e.upload_ok
+                    and mine is not None
+                    and len(now[0]) > len(mine)
+                    and now[0].startswith(mine)
+                ):
                     return emit(
                         {
                             "remote": remote,
                             "id": now[1]["id"],
                             "appended": len(frag),
                             "attempts": attempt,
-                            "note": "landed; later appends followed",
+                            "note": "our upload landed; later appends followed",
                             **now[1],
                         }
                     )
                 continue
-        raise Refused(
-            f"{remote}: append not done after {retries + 1} attempts; last: {last}"
+        raise Conflict(
+            f"{remote}: append not done after {retries + 1} attempts because other "
+            f"writers kept changing it; the lines are NOT in the log; last: {last}"
         )
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -588,15 +680,20 @@ TRASH_SUFFIX = ".cfs-trash-"
 
 
 def cmd_restore(remote_dir: str, want_id: str, name: str | None) -> int:
-    """Bring one trashed object back into REMOTE_DIR under its original name.
+    """Bring one trashed object back into REMOTE_DIR under a free name.
 
-    `rclone backend untrash` restores everything trashed in a folder (filters
-    are ignored), so the object is first moved by ID into a fresh empty folder,
-    untrashed there, then moved back by ID. A `trash --id` name suffix
-    (`<name>.cfs-trash-<ID>`) is stripped. Also renames an object that was
+    The target is NAME if given, else the trashed name with a `trash --id`
+    suffix (`<name>.cfs-trash-<ID>`) stripped. Before anything moves, an API
+    listing must show the target name free; otherwise refuse and leave the
+    object in trash. `rclone backend untrash` restores everything trashed in a
+    folder (filters are ignored), so the object is moved by ID into an empty
+    `.cfs-restore-<ID>` folder, untrashed there and moved back by ID; the empty
+    temp folder is then deleted for good. Also renames an object that was
     already restored by hand (e.g. from the Drive web UI).
     """
     remote_dir = remote_dir.rstrip("/")
+    if name is not None and ("/" in name or not name.strip() or name in (".", "..")):
+        raise Refused(f"--name {name!r} must be a plain file name")
     if remote_type(remote_dir) != "drive":
         raise Refused(f"{remote_dir} is not a Drive remote; restore is Drive-only")
     root = remote_dir.partition(":")[0] + ":"
@@ -614,37 +711,72 @@ def cmd_restore(remote_dir: str, want_id: str, name: str | None) -> int:
     if name is None and cur_name.endswith(sfx):
         target = cur_name[: -len(sfx)]
     dst = f"{remote_dir}/{target}"
-    clash = [r.get("ID") for r in objects(dst) if r.get("ID") != want_id]
+
+    def taken() -> list:
+        return [r.get("ID") for r in objects(dst) if r.get("ID") != want_id]
+
+    clash = taken()
+    if clash:
+        where = "in trash" if not live else f"as {remote_dir}/{cur_name}"
+        raise Refused(
+            f"{dst} is taken by {clash}; nothing moved, {want_id} stays {where}. "
+            "Restore under another name with --name NEW, or merge by hand"
+        )
     untrashed = False
-    if not live:
+    if live:
+        if cur_name != target:
+            run(["backend", "moveid", root, want_id, dst])
+    else:
         tmp = f"{remote_dir}/.cfs-restore-{want_id}"
         if list_dir(tmp) or list_dir(tmp, trashed=True):
-            raise Refused(f"{tmp} already exists; clean it up first")
+            raise Refused(
+                f"{tmp} exists and is not empty; nothing moved; clean it up first"
+            )
         run(["mkdir", tmp])
         run(["backend", "moveid", root, want_id, f"{tmp}/{cur_name}"])
         inside = list_dir(tmp, trashed=True)
-        if [r.get("ID") for r in inside] != [want_id]:
+        if [r.get("ID") for r in inside] != [want_id] or list_dir(tmp):
+            run(["backend", "moveid", root, want_id, f"{remote_dir}/{cur_name}"])
             raise Refused(
-                f"{tmp} trash holds {[r.get('ID') for r in inside]}, expected only {want_id}; not untrashing"
+                f"{tmp} held {[r.get('ID') for r in inside]}, expected only {want_id}; "
+                f"not untrashing; {want_id} moved back (still trashed); check {tmp} by hand"
             )
         res = json.loads(run(["backend", "untrash", tmp]).stdout or "{}")
         if res.get("Untrashed") != 1 or res.get("Errors"):
             raise Refused(f"untrash in {tmp} returned {res}; check by hand")
         untrashed = True
-        final = dst if not clash else f"{remote_dir}/{cur_name}"
-        run(["backend", "moveid", root, want_id, final])
-        run(["rmdir", tmp])
-    elif not clash and cur_name != target:
+        late = taken()
+        if late:
+            # The name was taken while we worked: put the object back in trash, where it was.
+            run(["deletefile", "--drive-use-trash", f"{tmp}/{cur_name}"])
+            run(["backend", "moveid", root, want_id, f"{remote_dir}/{cur_name}"])
+            remove_empty_tmp(tmp)
+            raise Refused(
+                f"{dst} was taken by {late} during the restore; {want_id} is back in trash; "
+                "use --name NEW"
+            )
         run(["backend", "moveid", root, want_id, dst])
-    where = dst if not clash else f"{remote_dir}/{cur_name}"
-    got = [r for r in objects(where) if r.get("ID") == want_id]
+        remove_empty_tmp(tmp)
+    got = [r for r in objects(dst) if r.get("ID") == want_id]
     if len(got) != 1 or md5_of(got[0]) != st["md5"] or got[0]["Size"] != st["size"]:
-        raise Refused(f"{want_id} not confirmed at {where} after restore ({got})")
-    if clash:
-        raise Refused(
-            f"{dst} already exists ({clash}); {want_id} is restored but left as {where}: merge by hand"
-        )
+        raise Refused(f"{want_id} not confirmed at {dst} after restore ({got})")
+    others = [r.get("ID") for r in objects(dst) if r.get("ID") != want_id]
+    if others:
+        raise Conflict(f"{dst} also holds {others} after the restore: merge by hand")
     return emit({"restored": dst, "untrashed": untrashed, "from_name": cur_name, **st})
+
+
+def remove_empty_tmp(tmp: str) -> None:
+    """Delete our temp folder for good, only after the API shows it empty.
+
+    It is empty and was made by this run, so a permanent delete loses nothing;
+    a trashed copy would come back with any later untrash of the parent folder.
+    """
+    if list_dir(tmp) or list_dir(tmp, trashed=True):
+        raise Refused(f"{tmp} is not empty; left in place")
+    run(["rmdir", "--drive-use-trash=false", tmp])
+    if objects(tmp):
+        raise Refused(f"{tmp} still listed after rmdir")
 
 
 def cmd_lsjson(remote_dir: str) -> int:
@@ -723,6 +855,12 @@ def main(argv: list[str] | None = None) -> int:
         "--retries", type=int, default=5, help="re-read and retry this many times"
     )
     ap.add_argument("--preimage-dir", help="save each replaced body here")
+    ap.add_argument(
+        "--settle",
+        type=float,
+        default=3.0,
+        help="seconds to wait, then check our lines are still there (0 = off)",
+    )
     m = sub.add_parser("moveto", help="rclone moveto SRC DST; refuse if DST exists")
     m.add_argument("src")
     m.add_argument("dst")
@@ -737,7 +875,8 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("remote_dir", help="the folder the object was trashed from")
     rs.add_argument("--id", required=True)
     rs.add_argument(
-        "--name", help="restore under this name (default: strip .cfs-trash-<ID>)"
+        "--name",
+        help="restore under this NEW name (default: the trashed name minus .cfs-trash-<ID>)",
     )
     ls = sub.add_parser(
         "lsjson", help="list a folder via the API; refuse on duplicate names"
@@ -760,7 +899,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         if a.cmd == "append":
             return cmd_append(
-                a.fragment, a.remote, a.create, a.text, a.retries, a.preimage_dir
+                a.fragment,
+                a.remote,
+                a.create,
+                a.text,
+                a.retries,
+                a.preimage_dir,
+                a.settle,
             )
         if a.cmd == "restore":
             return cmd_restore(a.remote_dir, a.id, a.name)

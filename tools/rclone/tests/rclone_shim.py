@@ -13,7 +13,8 @@ Environment knobs (all optional):
                             another writer: write SHIM_HOOK_DATA to the local path
                             SHIM_HOOK_PATH (SHIM_HOOK_APPEND=1 appends instead);
                             SHIM_HOOK_WHEN=before|after (default after);
-                            SHIM_HOOK_DONE=<file> marks that it fired
+                            SHIM_HOOK_DONE=<file> marks that it fired;
+                            SHIM_HOOK_NTH=<n> fires at the n-th <cmd> instead (default 1)
 """
 
 import json
@@ -36,6 +37,13 @@ def hook(when: str) -> None:
         return
     if os.environ.get("SHIM_HOOK_WHEN", "after") != when or os.path.exists(done):
         return
+    nth = int(os.environ.get("SHIM_HOOK_NTH", "1"))
+    if nth > 1:
+        cnt = done + ".n"
+        n = int(open(cnt).read()) + 1 if os.path.exists(cnt) else 1
+        open(cnt, "w").write(str(n))
+        if n != nth:
+            return
     data = os.environ["SHIM_HOOK_DATA"].encode()
     with open(
         os.environ["SHIM_HOOK_PATH"],

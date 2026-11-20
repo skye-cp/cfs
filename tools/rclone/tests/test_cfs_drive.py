@@ -54,6 +54,7 @@ class CfsDriveTest(unittest.TestCase):
             "SHIM_HOOK_DATA",
             "SHIM_HOOK_APPEND",
             "SHIM_HOOK_DONE",
+            "SHIM_HOOK_NTH",
         ):
             self.env.pop(k, None)
 
@@ -394,6 +395,7 @@ class CfsDriveTest(unittest.TestCase):
         data: bytes,
         when: str = "after",
         append: bool = False,
+        nth: int = 1,
     ):
         env = {
             "SHIM_HOOK_CMD": cmd,
@@ -404,6 +406,8 @@ class CfsDriveTest(unittest.TestCase):
         }
         if append:
             env["SHIM_HOOK_APPEND"] = "1"
+        if nth > 1:
+            env["SHIM_HOOK_NTH"] = str(nth)
         return env
 
     # N1: rollback never clobbers another writer (ver-4 codetest/race_rollback)
@@ -563,6 +567,111 @@ class CfsDriveTest(unittest.TestCase):
         self.assertIn("shrank", err)
         self.assertEqual((self.root / "x.log").read_bytes(), b"line 1\n")
 
+    # R2-2: an identical line from another writer never suppresses ours (ver-4 A11c)
+    def test_append_identical_line_from_another_writer_is_kept(self):
+        # Call order of one append: lsjson #1 (first), #2-#3 (read), #4-#5 (guards),
+        # copyto, #6 (post-write check), #7-#8 (settle). Inject the other writer's
+        # identical line after each listing in turn: both lines must end up in the log.
+        for nth in (2, 3, 4, 6, 7, 8):  # 5 is the pre-copyto window, see the next test
+            with self.subTest(nth=nth):
+                self.put("i.log", b"l1\n")
+                done = self.tmp / "hook.done"
+                for f in (done, Path(f"{done}.n")):
+                    f.unlink(missing_ok=True)
+                rc, out, err = self.tool(
+                    "append",
+                    self.local("frag.txt", b"mine\n"),
+                    self.r("i.log"),
+                    "--settle",
+                    "0.2",
+                    **self.hook("lsjson", "i.log", b"mine\n", append=True, nth=nth),
+                )
+                self.assertEqual(rc, 0, err)
+                self.assertTrue(done.exists())
+                self.assertEqual(
+                    (self.root / "i.log").read_bytes(), b"l1\nmine\nmine\n"
+                )
+
+    def test_append_redone_when_an_identical_upload_replaces_ours(self):
+        # The other side of the pre-copyto window: a writer that read the same base
+        # uploads the same line right after us. Same bytes, but not our modtime: ours
+        # is lost, so we append it again.
+        self.put("i.log", b"l1\n")
+        rc, out, err = self.tool(
+            "append",
+            self.local("frag.txt", b"mine\n"),
+            self.r("i.log"),
+            "--settle",
+            "0",
+            **self.hook("copyto", "i.log", b"l1\nmine\n"),
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["attempts"], 2)
+        self.assertEqual((self.root / "i.log").read_bytes(), b"l1\nmine\nmine\n")
+
+    def test_append_redone_when_overwritten_after_its_check(self):
+        # Another writer that read the log before our upload overwrites it right after
+        # our post-write check: the settle re-read sees our line gone and appends again.
+        self.put("x.log", b"l1\n")
+        rc, out, err = self.tool(
+            "append",
+            self.local("frag.txt", b"mine\n"),
+            self.r("x.log"),
+            "--settle",
+            "0.2",
+            **self.hook("lsjson", "x.log", b"l1\ntheirs\n", nth=6),
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["attempts"], 2)
+        self.assertEqual((self.root / "x.log").read_bytes(), b"l1\ntheirs\nmine\n")
+
+    # R2-3: append exits 3 once retries are used up
+    def test_append_exits_3_when_retries_are_exhausted(self):
+        self.put("x.log", b"l1\n")
+        rc, _, err = self.tool(
+            "append",
+            self.local("frag.txt", b"mine\n"),
+            self.r("x.log"),
+            "--retries",
+            "0",
+            **self.hook("cat", "x.log", b"other\n", append=True),
+        )
+        self.assertEqual(rc, 3, err)
+        self.assertIn("CONFLICT", err)
+        self.assertIn("NOT in the log", err)
+        self.assertEqual((self.root / "x.log").read_bytes(), b"l1\nother\n")
+
+    # R2-4: a same-name twin after write --create is a CONFLICT, never ok
+    def test_create_twin_after_upload_is_conflict(self):
+        rc, out, err = self.tool(
+            "write",
+            "--create",
+            self.local("n.md", b"new\n"),
+            self.r("n.md"),
+            SHIM_DUP_NAME="n.md",
+            SHIM_DUP_AFTER_COPYTO="1",
+        )
+        self.assertEqual(rc, 3, err)
+        self.assertEqual(out, "")
+        self.assertIn("CONFLICT", err)
+        self.assertIn("2 objects", err)
+        self.assertIn("dup-0", err)  # both IDs are listed
+        self.assertNotIn('"ok"', out)
+
+    def test_append_create_twin_is_conflict(self):
+        rc, out, err = self.tool(
+            "append",
+            "--create",
+            self.local("frag.txt", b"first\n"),
+            self.r("new.log"),
+            "--retries",
+            "0",
+            SHIM_DUP_NAME="new.log",
+            SHIM_DUP_AFTER_COPYTO="1",
+        )
+        self.assertEqual(rc, 3, err)
+        self.assertIn("CONFLICT", err)
+
     def test_restore_refused_off_drive(self):
         rc, _, err = self.tool("restore", f"t:{self.root}", "--id", "x")
         self.assertEqual(rc, 2)
@@ -654,6 +763,40 @@ class CfsDriveTest(unittest.TestCase):
             "write", self.local("w.md", b"q\n"), self.r("d.md"), "--create"
         )
         self.assertEqual(rc, 2)
+
+
+class ParseTimeTest(unittest.TestCase):
+    # rclone's Drive listing uses Z; local uses an offset. The zone must survive the
+    # fraction trimming (a bug read Z times as local time). Run under a far-off TZ.
+    def test_parse_time_keeps_the_zone(self):
+        code = (
+            "import sys; sys.path.insert(0, sys.argv[1]); import cfs_drive as c; "
+            "print([c.parse_time(v) for v in sys.argv[2:]])"
+        )
+        vals = [
+            "2026-11-20T16:54:13.513Z",
+            "2026-11-20T13:54:13.513-03:00",
+            "2026-11-20T13:54:13.513000000-03:00",
+            "2026-11-20T16:54:13Z",
+            "2026-11-20T16:54:13.5+00:00",
+        ]
+        p = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", code, str(TOOL.parent), *vals],
+            env={**os.environ, "TZ": "Asia/Tokyo"},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        got = json.loads(p.stdout.replace("None", "null"))
+        want = [
+            1795193653.513,
+            1795193653.513,
+            1795193653.513,
+            1795193653.0,
+            1795193653.5,
+        ]
+        for g, w in zip(got, want, strict=True):
+            self.assertAlmostEqual(g, w, places=3)
 
 
 if __name__ == "__main__":

@@ -63,11 +63,11 @@ Use the rclone CLI (or an equivalent Drive API client). `tools/rclone/cfs_drive.
 |---|---|---|
 | List (authoritative) | `lsjson gdrive:…/todo/` (refuses on duplicate names) | `rclone lsjson --hash gdrive:…/todo/` |
 | Read (base of an edit) | `read REMOTE LOCAL --state STATE` | `rclone lsjson --hash` then `rclone cat` |
-| Create | `write LOCAL REMOTE --create` (refuses if the name exists) | `rclone lsjson` (name absent), then `rclone copyto` |
+| Create | `write LOCAL REMOTE --create` (refuses if the name exists; exit 3 if a same-name twin appears after the upload: merge the twins) | `rclone lsjson` (name absent), then `rclone copyto` |
 | Update (same file ID) | `write LOCAL REMOTE --base STATE --preimage-dir DIR` | re-list and compare ID/size/MD5/modtime with your read, then `rclone copyto` |
 | Rename `-pending-` → `-complete-` | `moveto SRC DST` (refuses if DST exists) | `rclone lsjson` (DST absent), then `rclone moveto` |
 | Trash | `trash REMOTE` or, for a duplicated name, `trash REMOTE --id ID` (sits in trash as `<name>.cfs-trash-<ID>`) | `rclone deletefile --drive-use-trash`; for a duplicate, `rclone backend moveid` to a unique name first |
-| Restore from trash | `restore FOLDER --id ID` (strips the `.cfs-trash-<ID>` suffix; refuses to take a name that exists) | `rclone backend untrash` restores everything trashed in a folder: move the ID into an empty folder first |
+| Restore from trash | `restore FOLDER --id ID [--name NEW]` (strips the `.cfs-trash-<ID>` suffix, or uses `NEW`; if that name is taken it refuses before moving anything and the object stays in trash; deletes its empty temp folder permanently) | list the target name first (must be absent); `rclone backend untrash` restores everything trashed in a folder: move the ID into an empty folder first, then move it back and remove that folder |
 | Append a line (logs) | `append FRAGMENT REMOTE [--create]` | read, append, then the Update row |
 
 **Before writing, refuse** if the name has more than one object, if the file changed since your read, if a `-complete-` already exists for a close (merge the pending's unique content into it with a dated note, then trash the pending; see Troubleshooting for the only edits allowed on a complete), or if the body is not UTF-8, has no trailing newline, or is smaller than the current file without a reason.
