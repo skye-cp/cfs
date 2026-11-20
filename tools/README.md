@@ -12,6 +12,7 @@ CFS itself is markdown-only. Flows describe *what* needs to happen; the agent pi
 | [`gworks/`](gworks/README.md) | Gmail and Google Calendar operations, one identity per call (JSON CLI) | A Google identity with no native, MCP, or connector capability |
 | [`markitdown/`](markitdown/README.md) | Extract text from complex binary formats (Excel, PowerPoint, Word, etc.) | Agent can't read a format directly |
 | [`ocr/`](ocr/README.md) | OCR for images using Surya | Agent's visual reading is unreliable (tall images, small text, 16-bit color) |
+| [`rclone/`](rclone/README.md) | Thin rclone CLI wrapper for Drive-backed todo writes (`copyto` / `moveto` / trash-by-id) that refuses on a size or MD5 mismatch | `{admin}` is on Google Drive and rclone is the available CLI; see `flows/admin/todo.md` Step 1b |
 
 Each tool has its own `README.md`, `requirements.txt`, and `setup.sh`. Install only the ones you need:
 

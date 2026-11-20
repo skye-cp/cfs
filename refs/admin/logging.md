@@ -109,7 +109,7 @@ Examples:
 2024-11-05-1015-complete-entity_name_incomplete_for_j_doe.md
 ```
 
-Status changes are reflected by renaming the file: `pending` → `complete`.
+Status changes are reflected by renaming the file: `pending` → `complete`. On a Drive-backed admin path, rename with `rclone moveto` (or an equivalent Drive API call), never with `mv` on a FUSE mount; then confirm through the API that the complete name has exactly one object and the pending name is gone. See `flows/admin/todo.md` Step 1b.
 
 ### Content
 

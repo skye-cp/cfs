@@ -51,12 +51,38 @@ When already inside another flow's execution, that flow's "create a todo" instru
 3. **Path** — resolve `{admin}` from `config.yaml`; the todo lives at `{admin}/<layer>/todo/`.
 4. For update/close: locate the existing todo file. If the reference is ambiguous (multiple matches, vague title), surface candidates and ask.
 
+### Step 1b: Drive-backed writes (mandatory when `{admin}` is on Google Drive)
+
+**Objective:** Every create, update, close, or bulk header edit goes through the Drive API, never through a FUSE mount such as `~/gdrive`.
+
+Google Drive allows two objects with the same name in one folder, and an rclone mount can serve a stale listing or a short cached body. A close implemented as `mv` or `os.replace` on the mount can leave the pending object in place and can create a second complete object.
+
+Use the rclone CLI (or an equivalent Drive API client). A thin wrapper lives at `tools/rclone/cfs_drive.py` when rclone is the available CLI.
+
+| Action | Command |
+|---|---|
+| List (authoritative) | `rclone lsf` / `rclone lsjson --hash` on `gdrive:System/Admin/<layer>/todo/` |
+| Read | `rclone cat` or `rclone copyto` into scratch |
+| Create or overwrite (same file ID) | `rclone copyto LOCAL gdrive:…/todo/<file>` |
+| Rename `-pending-` → `-complete-` | `rclone moveto` on the two remote paths |
+| Delete / trash (by path, or by ID if a name is duplicated) | `rclone deletefile --drive-use-trash`, or `cfs_drive.py trash-id <id>` |
+
+**Verify, or refuse.** After every write or rename, re-read through the API (`rclone lsjson --hash`, not the mount):
+
+- Size and MD5 match the bytes you intended to write.
+- After a close: the complete name has **exactly one** ID, and the pending name is gone.
+- The file ends with a newline.
+
+If any check fails, stop, do not report the todo updated or closed, and do not continue a bulk edit. Leave the API state as you found it if you can roll back; otherwise record the mismatch (path, expected size/md5, actual size/md5, IDs) and escalate.
+
+Do not treat a successful local write to `~/gdrive` as confirmation. Mount read-back after `open(path, 'wb')` can agree with a buffer that later, or already, disagrees with Drive.
+
 ### Step 2: Create
 
 **Objective:** Write a new pending todo conforming to `refs/admin/logging.md`.
 
 1. **Filename and body** — per `refs/admin/logging.md` § Todos. Source value for this flow is `todo flow (explicit invocation)`.
-2. Write the file. Verify it exists at the resolved path.
+2. Write the file through the API (`rclone copyto`). Verify size, MD5 and a trailing newline per Step 1b. Do not write it through `~/gdrive`.
 
 ### Step 3: Update
 
@@ -65,7 +91,7 @@ When already inside another flow's execution, that flow's "create a todo" instru
 1. Read the existing todo.
 2. Apply the update — typically appending dated notes, refining the Description or Affected items, revising Suggested next steps as understanding evolves, or changing the Owner or Waiting on line.
 3. Do not rename the file. Status remains `pending`.
-4. Write and verify.
+4. Write through the API (`rclone copyto`) and verify size, MD5 and a trailing newline per Step 1b.
 
 ### Step 4: Close
 
@@ -75,8 +101,8 @@ When already inside another flow's execution, that flow's "create a todo" instru
 2. Append a `## Resolution` section to the body, in one of two shapes:
    - **Resolved** — timestamp, action taken, outcome. Use when the work the todo described has been done.
    - **Obsolete** — timestamp, reason no longer relevant, and a pointer to the superseding todo or state if applicable. Use when the todo was overtaken by later events.
-3. Rename the file: replace `-pending-` with `-complete-`. No other parts of the filename change.
-4. Verify the new filename exists and the old one does not.
+3. Rename the file with `rclone moveto`: replace `-pending-` with `-complete-`. No other parts of the filename change. Do not `mv` or `os.replace` on a FUSE mount.
+4. Verify through the API: the complete name exists as exactly one object, its size and MD5 match the body you wrote, and the pending name is gone.
 
 ### Step 5: Log
 
@@ -134,7 +160,8 @@ Solution: List candidates by filename and ask. Never modify a `-complete-` todo 
 | Document | When to consult |
 |---|---|
 | `refs/admin/logging.md` | All steps — filename format, required fields, sensitivity rules |
-| `refs/admin/safety.md` | Step 1 — todos are self-managed admin state; user-data mutations referenced by a todo still require consent when acted on |
+| `refs/admin/safety.md` | Step 1 — todos are self-managed admin state; user-data mutations referenced by a todo still require consent when acted on. Step 1b — backend API writes. |
+| `tools/rclone/cfs_drive.py` | Optional rclone wrapper that refuses to complete on a size or MD5 mismatch |
 | `refs/admin/addressing.md` | Step 1 — resolving `{admin}` and referencing affected items |
 | `config.yaml` | Step 1 — `admin:` address |
 | Inline-creating flows (`file`, `keep`, `rule`, `encode`, `reflect`) | When already inside one of these, prefer its inline todo guidance over dispatching here |
