@@ -16,6 +16,7 @@ Four goals:
 - Read `config.yaml` for knowledge layer paths.
 - See `refs/admin/safety.md` § User consent for the rule on what reflect may and may not do — reflect performs many mutations (renames, merges, restructures, deletions); each is consent-gated.
 - Read `{admin}/knowledge/todo/` for pending items.
+- On a Drive-backed knowledge layer, every edit, rename, merge or deletion goes through the API with the guards in `refs/admin/safety.md` § Writable mirrors; read the base of any edit through the API, never through the mount.
 
 ## Input
 

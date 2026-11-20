@@ -53,29 +53,32 @@ When already inside another flow's execution, that flow's "create a todo" instru
 
 ### Step 1b: Drive-backed writes (mandatory when `{admin}` is on Google Drive)
 
-**Objective:** Every create, update, close, or bulk header edit goes through the Drive API, never through a FUSE mount such as `~/gdrive`.
+**Objective:** Every create, update, close, or bulk header edit reads and writes through the Drive API, never through a FUSE mount such as `~/gdrive`. This applies the rule in `refs/admin/safety.md` § Writable mirrors to todos.
 
-Google Drive allows two objects with the same name in one folder, and an rclone mount can serve a stale listing or a short cached body. A close implemented as `mv` or `os.replace` on the mount can leave the pending object in place and can create a second complete object.
+Google Drive allows two objects with the same name in one folder, and an rclone mount can serve a stale listing or a body cut to a stale size. A close done as `mv` or `os.replace` on the mount can leave the pending object in place and can create a second complete object, and an edit based on a mount read can write a truncated body back.
 
-Use the rclone CLI (or an equivalent Drive API client). A thin wrapper lives at `tools/rclone/cfs_drive.py` when rclone is the available CLI.
+Use the rclone CLI (or an equivalent Drive API client). `tools/rclone/cfs_drive.py` wraps the guarded sequence when rclone is the available CLI.
 
-| Action | Command |
-|---|---|
-| List (authoritative) | `rclone lsf` / `rclone lsjson --hash` on `gdrive:System/Admin/<layer>/todo/` |
-| Read | `rclone cat` or `rclone copyto` into scratch |
-| Create or overwrite (same file ID) | `rclone copyto LOCAL gdrive:…/todo/<file>` |
-| Rename `-pending-` → `-complete-` | `rclone moveto` on the two remote paths |
-| Delete / trash (by path, or by ID if a name is duplicated) | `rclone deletefile --drive-use-trash`, or `cfs_drive.py trash-id <id>` |
+| Action | With `cfs_drive.py` | Plain rclone equivalent |
+|---|---|---|
+| List (authoritative) | `lsjson gdrive:…/todo/` (refuses on duplicate names) | `rclone lsjson --hash gdrive:…/todo/` |
+| Read (base of an edit) | `read REMOTE LOCAL --state STATE` | `rclone lsjson --hash` then `rclone cat` |
+| Create | `write LOCAL REMOTE --create` (refuses if the name exists) | `rclone lsjson` (name absent), then `rclone copyto` |
+| Update (same file ID) | `write LOCAL REMOTE --base STATE --preimage-dir DIR` | re-list and compare ID/size/MD5/modtime with your read, then `rclone copyto` |
+| Rename `-pending-` → `-complete-` | `moveto SRC DST` (refuses if DST exists) | `rclone lsjson` (DST absent), then `rclone moveto` |
+| Trash | `trash REMOTE` or, for a duplicated name, `trash REMOTE --id ID` | `rclone deletefile --drive-use-trash`; for a duplicate, `rclone backend moveid` to a unique name first |
 
-**Verify, or refuse.** After every write or rename, re-read through the API (`rclone lsjson --hash`, not the mount):
+**Before writing, refuse** if the name has more than one object, if the file changed since your read, if a `-complete-` already exists for a close (merge into it instead), or if the body is not UTF-8, has no trailing newline, or is smaller than the current file without a reason.
 
-- Size and MD5 match the bytes you intended to write.
+**After writing, verify through the API, or refuse** (`rclone lsjson --hash`, not the mount):
+
+- Size and MD5 match the bytes you intended to write, and an update kept the same file ID.
 - After a close: the complete name has **exactly one** ID, and the pending name is gone.
-- The file ends with a newline.
+- After a trash: the ID is gone from the folder and listed by `rclone lsjson --drive-trashed-only`.
 
-If any check fails, stop, do not report the todo updated or closed, and do not continue a bulk edit. Leave the API state as you found it if you can roll back; otherwise record the mismatch (path, expected size/md5, actual size/md5, IDs) and escalate.
+If any check fails, stop, do not report the todo updated or closed, and do not continue a bulk edit. Restore the pre-image if the write changed the file; otherwise record the mismatch (path, expected size/md5, actual size/md5, IDs) and escalate.
 
-Do not treat a successful local write to `~/gdrive` as confirmation. Mount read-back after `open(path, 'wb')` can agree with a buffer that later, or already, disagrees with Drive.
+Do not treat a successful local write to `~/gdrive`, or a read-back through it, as confirmation: the mount can agree with a buffer that disagrees with Drive.
 
 ### Step 2: Create
 
@@ -161,7 +164,7 @@ Solution: List candidates by filename and ask. Never modify a `-complete-` todo 
 |---|---|
 | `refs/admin/logging.md` | All steps — filename format, required fields, sensitivity rules |
 | `refs/admin/safety.md` | Step 1 — todos are self-managed admin state; user-data mutations referenced by a todo still require consent when acted on. Step 1b — backend API writes. |
-| `tools/rclone/cfs_drive.py` | Optional rclone wrapper that refuses to complete on a size or MD5 mismatch |
+| `tools/rclone/cfs_drive.py` | Optional rclone wrapper: guarded read, write, rename and trash that refuse on duplicates, concurrent edits, invalid bodies, or a size or MD5 mismatch |
 | `refs/admin/addressing.md` | Step 1 — resolving `{admin}` and referencing affected items |
 | `config.yaml` | Step 1 — `admin:` address |
 | Inline-creating flows (`file`, `keep`, `rule`, `encode`, `reflect`) | When already inside one of these, prefer its inline todo guidance over dispatching here |

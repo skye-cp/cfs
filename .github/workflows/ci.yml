@@ -27,6 +27,12 @@ jobs:
       - name: Run security and quality checks
         run: pre-commit run --all-files
 
+      - name: Install rclone (for tool tests)
+        run: sudo apt-get update && sudo apt-get install -y rclone
+
+      - name: Run tool tests
+        run: python3 -m unittest discover -s tools/rclone/tests -v
+
       - name: Check for pii:allow exceptions
         run: |
           if grep -rn "pii:allow" --include='*.md' --include='*.yaml' --include='*.py' .; then

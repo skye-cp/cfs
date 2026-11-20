@@ -10,6 +10,7 @@ Captures understanding from a conversation, a filed item, an observation, or any
 
 - Read `config.yaml` for knowledge layer paths and any defined external sources (`sources:`).
 - See `refs/admin/safety.md` § User consent for the rule on what encode may and may not do (encode appends and creates; renames, merges, restructures, and deletions are reflect's job). § Source protection — external sources are pull-only.
+- On a Drive-backed knowledge layer, an append to an existing node is a read-modify-write: read the node through the API and write it back with the guards in `refs/admin/safety.md` § Writable mirrors (`tools/rclone/cfs_drive.py read` / `write --base`), never through the mount.
 
 ## Input
 

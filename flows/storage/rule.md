@@ -65,7 +65,7 @@ Does not cover:
 
 **Objective:** Write the entry to the admin artifact.
 
-1. Append (new entries) or modify (changes) the relevant file.
+1. Append (new entries) or modify (changes) the relevant file. On a Drive-backed `{admin}`, this is a read-modify-write: read the file through the API and write it with the guards in `refs/admin/safety.md` § Writable mirrors, never through the mount.
 2. For removals, remove the entry and note the reason in the log.
 3. The admin artifact is CFS-managed state — the write is flow-internal and requires no further consent beyond the user's confirmation of the wording.
 

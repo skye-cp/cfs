@@ -12,7 +12,7 @@ Four goals:
 
 ## Prerequisites
 
-- Read `config.yaml` for storage layer addresses and backend declarations. See `refs/admin/safety.md` § Backend dispatch for the rule on how to operate on each — keep performs many mutations (renames, moves, deletions) and must dispatch through a capability that operates on the backend's API.
+- Read `config.yaml` for storage layer addresses and backend declarations. See `refs/admin/safety.md` § Backend dispatch for the rule on how to operate on each — keep performs many mutations (renames, moves, deletions) and must dispatch through a capability that operates on the backend's API. On Drive, read the base of any edit through the API and apply the guards in § Writable mirrors (`tools/rclone/cfs_drive.py`).
 - Read `{admin}/storage/targets.md` for established patterns.
 
 ## Input
