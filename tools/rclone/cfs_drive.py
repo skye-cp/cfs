@@ -19,8 +19,16 @@ def run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
 
 
 def lsjson(remote: str) -> list[dict]:
-    out = run(["rclone", "lsjson", remote, "--hash"]).stdout
-    return json.loads(out or "[]")
+    """List one path. A missing file is [] (rclone reports 'directory not found')."""
+    proc = run(["rclone", "lsjson", remote, "--hash"], check=False)
+    if proc.returncode != 0:
+        err = (proc.stderr or "") + (proc.stdout or "")
+        if "directory not found" in err or "object not found" in err:
+            return []
+        print(f"REFUSED: rclone failed: {proc.args}", file=sys.stderr)
+        print(err, file=sys.stderr)
+        raise SystemExit(2)
+    return json.loads(proc.stdout or "[]")
 
 
 def md5_bytes(data: bytes) -> str:
