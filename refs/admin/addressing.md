@@ -79,7 +79,7 @@ backends:
       server_c: { path: ~/gdrive, writable: true }   # mount that writes through the backend's API (e.g. rclone)
 ```
 
-Mirror semantics are governed by `refs/admin/safety.md` § Backend dispatch — reads may use any mirror; mutations go through the backend's API, directly or through a writable mirror. The agent uses the mirror entry whose key matches the active local backend (its `path` when the entry is a mapping); if no key matches, dispatch is API-only.
+Mirror semantics are governed by `refs/admin/safety.md` § Backend dispatch — reads may use any mirror; mutations go through the backend's API only, never through a mirror, writable or not (§ Writable mirrors). The agent uses the mirror entry whose key matches the active local backend (its `path` when the entry is a mapping); if no key matches, dispatch is API-only.
 
 ## Active-backend determination
 
@@ -179,5 +179,5 @@ backends:
 ```
 
 - Session on `laptop_a`: `laptop_a:` and `gdrive:` active; `laptop_b:` inert.
-- Session on `laptop_b`: `laptop_b:` and `gdrive:` active; `laptop_a:` inert. Its mirror is writable, so mutations may go through `~/gdrive` as well as the API.
+- Session on `laptop_b`: `laptop_b:` and `gdrive:` active; `laptop_a:` inert. Its mirror is declared writable (an rclone mount), but mutations still go only through the API; `~/gdrive` serves reads that are not the base of a write.
 - Cloud session: `gdrive:` active via API; both local backends inert.

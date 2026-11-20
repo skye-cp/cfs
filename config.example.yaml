@@ -44,12 +44,12 @@ language: en
 # - Remote (`type: gdrive`, etc.) — a service the agent reaches via API/MCP/CLI.
 #                            Active wherever the agent has the capability.
 #                            May declare a `mirrors:` map of per-machine local
-#                            paths. A path entry is read-only; mutations go
+#                            paths, used for reads; every mutation goes
 #                            through the backend's API. An entry
-#                            `{ path: ..., writable: true }` also takes
-#                            mutations, and is only for mounts that write
-#                            through the backend's API (e.g. rclone), never a
-#                            desktop sync client
+#                            `{ path: ..., writable: true }` records a mount
+#                            that writes through the backend's API (e.g.
+#                            rclone), never a desktop sync client; CFS still
+#                            mutates only through the API
 #                            (see refs/admin/safety.md § Backend dispatch).
 #
 # Recognized `match:` fields: hostname, local_hostname, computer_name,

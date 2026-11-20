@@ -66,9 +66,11 @@ Use the rclone CLI (or an equivalent Drive API client). `tools/rclone/cfs_drive.
 | Create | `write LOCAL REMOTE --create` (refuses if the name exists) | `rclone lsjson` (name absent), then `rclone copyto` |
 | Update (same file ID) | `write LOCAL REMOTE --base STATE --preimage-dir DIR` | re-list and compare ID/size/MD5/modtime with your read, then `rclone copyto` |
 | Rename `-pending-` → `-complete-` | `moveto SRC DST` (refuses if DST exists) | `rclone lsjson` (DST absent), then `rclone moveto` |
-| Trash | `trash REMOTE` or, for a duplicated name, `trash REMOTE --id ID` | `rclone deletefile --drive-use-trash`; for a duplicate, `rclone backend moveid` to a unique name first |
+| Trash | `trash REMOTE` or, for a duplicated name, `trash REMOTE --id ID` (sits in trash as `<name>.cfs-trash-<ID>`) | `rclone deletefile --drive-use-trash`; for a duplicate, `rclone backend moveid` to a unique name first |
+| Restore from trash | `restore FOLDER --id ID` (strips the `.cfs-trash-<ID>` suffix; refuses to take a name that exists) | `rclone backend untrash` restores everything trashed in a folder: move the ID into an empty folder first |
+| Append a line (logs) | `append FRAGMENT REMOTE [--create]` | read, append, then the Update row |
 
-**Before writing, refuse** if the name has more than one object, if the file changed since your read, if a `-complete-` already exists for a close (merge into it instead), or if the body is not UTF-8, has no trailing newline, or is smaller than the current file without a reason.
+**Before writing, refuse** if the name has more than one object, if the file changed since your read, if a `-complete-` already exists for a close (merge the pending's unique content into it with a dated note, then trash the pending; see Troubleshooting for the only edits allowed on a complete), or if the body is not UTF-8, has no trailing newline, or is smaller than the current file without a reason.
 
 **After writing, verify through the API, or refuse** (`rclone lsjson --hash`, not the mount):
 
@@ -76,7 +78,7 @@ Use the rclone CLI (or an equivalent Drive API client). `tools/rclone/cfs_drive.
 - After a close: the complete name has **exactly one** ID, and the pending name is gone.
 - After a trash: the ID is gone from the folder and listed by `rclone lsjson --drive-trashed-only`.
 
-If any check fails, stop, do not report the todo updated or closed, and do not continue a bulk edit. Restore the pre-image if the write changed the file; otherwise record the mismatch (path, expected size/md5, actual size/md5, IDs) and escalate.
+If any check fails, stop, do not report the todo updated or closed, and do not continue a bulk edit. Restore the pre-image only if the file still holds your own upload (`cfs_drive.py` does this check); if it holds another writer's content (exit 3, `CONFLICT`), leave it and redo your edit on top; otherwise record the mismatch (path, expected size/md5, actual size/md5, IDs) and escalate.
 
 Do not treat a successful local write to `~/gdrive`, or a read-back through it, as confirmation: the mount can agree with a buffer that disagrees with Drive.
 
@@ -156,7 +158,7 @@ Solution: Pick the layer where the action will land. If actions are split across
 
 **Existing todo not found by reference**
 Cause: Reference is ambiguous, layer guess is wrong, or the todo is already `-complete-`.
-Solution: List candidates by filename and ask. Never modify a `-complete-` todo to back-fill state; if reopening is intended, create a new pending todo that references the closed one.
+Solution: List candidates by filename and ask. Modify a `-complete-` todo only to merge content from its stale pending twin (Step 1b) or to correct a stale or wrong field in its record (for example a `Waiting on` that is no longer true), each time with a dated note saying what changed and why. Never change its outcome or reopen it in place; if reopening is intended, create a new pending todo that references the closed one.
 
 ## References
 

@@ -39,6 +39,16 @@ Examples:
 
 Highest level is the most severe level recorded within the file: `info` < `warn` < `error`.
 
+### Writing logs on a remote backend
+
+When `{admin}` is on a remote backend (e.g. Google Drive), write logs through the backend's API, never through a mount such as `~/gdrive`, writable or not (`refs/admin/safety.md` § Writable mirrors). With rclone:
+
+- **Start the run's log:** `tools/rclone/cfs_drive.py append FRAGMENT REMOTE --create`, or keep the log in the run folder and upload it once with `write LOCAL REMOTE --create`.
+- **Add lines:** put them in a local fragment file (ending with a newline) and run `cfs_drive.py append FRAGMENT REMOTE`. It reads the log through the API, appends, writes with a compare-and-swap on the MD5 it read, and re-reads and retries if another writer changed the log meanwhile. It refuses when the log does not end with a newline or got shorter (signs of truncation): stop and report.
+- **Shared daily logs** (one file several agents append to): always `append`; never rewrite the whole file from a local copy.
+- **Level rises during the run:** rename the log with `cfs_drive.py moveto` to the new highest level after the last append.
+- Exit `2` (`REFUSED`) or `3` (`CONFLICT`) means the lines are not in the log yet: keep them locally and retry or report.
+
 ### Line format
 
 ```

@@ -48,6 +48,12 @@ class CfsDriveTest(unittest.TestCase):
             "SHIM_COPYTO",
             "SHIM_COPYTO_ONCE",
             "CFS_DRIVE_ALLOW_NON_DRIVE",
+            "SHIM_HOOK_CMD",
+            "SHIM_HOOK_WHEN",
+            "SHIM_HOOK_PATH",
+            "SHIM_HOOK_DATA",
+            "SHIM_HOOK_APPEND",
+            "SHIM_HOOK_DONE",
         ):
             self.env.pop(k, None)
 
@@ -363,7 +369,8 @@ class CfsDriveTest(unittest.TestCase):
         self.assertIn("rolled back", err)
         self.assertEqual((self.root / "a.md").read_bytes(), b"original body\n")
 
-    def test_short_upload_without_preimage_reports(self):
+    def test_short_upload_without_preimage_dir_still_rolled_back(self):
+        # N10: the pre-image is always kept (temp folder), so rollback works without --preimage-dir.
         self.put("a.md", b"original body\n")
         st = self.read_state("a.md")
         rc, _, err = self.tool(
@@ -373,9 +380,193 @@ class CfsDriveTest(unittest.TestCase):
             "--base",
             st,
             SHIM_COPYTO="truncate:5",
+            SHIM_COPYTO_ONCE="1",
         )
         self.assertEqual(rc, 2)
+        self.assertIn("rolled back", err)
+        self.assertIn("verified", err)
+        self.assertEqual((self.root / "a.md").read_bytes(), b"original body\n")
+
+    def hook(
+        self,
+        cmd: str,
+        name: str,
+        data: bytes,
+        when: str = "after",
+        append: bool = False,
+    ):
+        env = {
+            "SHIM_HOOK_CMD": cmd,
+            "SHIM_HOOK_WHEN": when,
+            "SHIM_HOOK_PATH": str(self.root / name),
+            "SHIM_HOOK_DATA": data.decode(),
+            "SHIM_HOOK_DONE": str(self.tmp / "hook.done"),
+        }
+        if append:
+            env["SHIM_HOOK_APPEND"] = "1"
+        return env
+
+    # N1: rollback never clobbers another writer (ver-4 codetest/race_rollback)
+    def test_race_rollback_keeps_other_writers_edit(self):
+        # B (this tool) and A read the same base. B's copyto lands, then A's upload lands
+        # and A is told ok. B's post-write check sees A's body: it must report a conflict
+        # and leave A's edit, not roll back to the base.
+        self.put("f.md", b"base\n")
+        st = self.read_state("f.md")
+        a_edit = b"base\nA edit (A was told ok)\n"
+        rc, _, err = self.tool(
+            "write",
+            self.local("f.new.md", b"base\nB edit\n"),
+            self.r("f.md"),
+            "--base",
+            st,
+            "--preimage-dir",
+            str(self.work / "pre"),
+            **self.hook("copyto", "f.md", a_edit.decode().encode()),
+        )
+        self.assertEqual(rc, 3, err)
+        self.assertIn("CONFLICT", err)
         self.assertIn("NOT rolled back", err)
+        self.assertEqual((self.root / "f.md").read_bytes(), a_edit)
+        self.assertEqual(self.copytos(), 1)  # no rollback upload
+
+    def test_rollback_skipped_when_short_body_is_not_ours(self):
+        # A short body that is not a prefix of our bytes is someone else's: no rollback.
+        self.put("f.md", b"original body\n")
+        st = self.read_state("f.md")
+        rc, _, err = self.tool(
+            "write",
+            self.local("f.new.md", b"original body\nmine\n"),
+            self.r("f.md"),
+            "--base",
+            st,
+            **self.hook("copyto", "f.md", b"theirs\n"),
+        )
+        self.assertEqual(rc, 3, err)
+        self.assertEqual((self.root / "f.md").read_bytes(), b"theirs\n")
+
+    def test_toctou_window_is_a_documented_limit(self):
+        # A write that lands just before our copyto is overwritten and not seen by this
+        # tool (README Limits); the other writer's own post-write check reports CONFLICT.
+        self.put("f.md", b"base\n")
+        st = self.read_state("f.md")
+        rc, _, err = self.tool(
+            "write",
+            self.local("f.new.md", b"base\nB\n"),
+            self.r("f.md"),
+            "--base",
+            st,
+            **self.hook("copyto", "f.md", b"base\nA\n", when="before"),
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((self.root / "f.md").read_bytes(), b"base\nB\n")
+
+    def test_same_size_same_mtime_edit_is_uploaded(self):
+        # N10: copyto would skip a same-size, same-modtime file; --ignore-times uploads it.
+        p = self.put("f.md", b"aaaa\n")
+        st = self.read_state("f.md")
+        loc = Path(self.local("f.new.md", b"bbbb\n"))
+        m = p.stat().st_mtime
+        os.utime(loc, (m, m))
+        rc, _, err = self.tool("write", str(loc), self.r("f.md"), "--base", st)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((self.root / "f.md").read_bytes(), b"bbbb\n")
+
+    def test_text_flag_checks_a_suffixless_file(self):
+        rc, _, err = self.tool(
+            "write",
+            self.local("script", b"#!/bin/sh\necho"),
+            self.r("script"),
+            "--create",
+            "--text",
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("newline", err)
+        rc, _, err = self.tool(
+            "write",
+            self.local("script", b"#!/bin/sh\necho\n"),
+            self.r("script"),
+            "--create",
+            "--text",
+        )
+        self.assertEqual(rc, 0, err)
+
+    # N2: append
+    def test_append_to_log(self):
+        self.put("x.log", b"line 1\n")
+        rc, out, err = self.tool(
+            "append", self.local("frag.txt", b"line 2\n"), self.r("x.log")
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((self.root / "x.log").read_bytes(), b"line 1\nline 2\n")
+        self.assertEqual(json.loads(out)["attempts"], 1)
+
+    def test_append_missing_needs_create(self):
+        frag = self.local("frag.txt", b"first\n")
+        rc, _, err = self.tool("append", frag, self.r("new.log"))
+        self.assertEqual(rc, 2)
+        self.assertIn("--create", err)
+        rc, _, err = self.tool("append", frag, self.r("new.log"), "--create")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((self.root / "new.log").read_bytes(), b"first\n")
+
+    def test_append_refuses_cut_base_and_bad_fragment(self):
+        self.put("x.log", b"line 1\nline 2 cut")
+        rc, _, err = self.tool(
+            "append", self.local("frag.txt", b"line 3\n"), self.r("x.log")
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("possible truncation", err)
+        self.put("y.log", b"ok\n")
+        rc, _, err = self.tool(
+            "append", self.local("frag.txt", b"no newline"), self.r("y.log")
+        )
+        self.assertEqual(rc, 2)
+        self.assertEqual((self.root / "y.log").read_bytes(), b"ok\n")
+        self.assertEqual(self.copytos(), 0)
+
+    def test_append_retries_when_another_writer_appends_first(self):
+        # Another agent appends right after our read: CAS refuses, we re-read and retry.
+        self.put("x.log", b"line 1\n")
+        rc, out, err = self.tool(
+            "append",
+            self.local("frag.txt", b"mine\n"),
+            self.r("x.log"),
+            **self.hook("cat", "x.log", b"theirs\n", append=True),
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((self.root / "x.log").read_bytes(), b"line 1\ntheirs\nmine\n")
+        self.assertEqual(json.loads(out)["attempts"], 2)
+
+    def test_append_retries_after_post_write_conflict(self):
+        # The ver-4 race applied to a log: their upload lands right after ours. Both lines survive.
+        self.put("x.log", b"line 1\n")
+        rc, out, err = self.tool(
+            "append",
+            self.local("frag.txt", b"mine\n"),
+            self.r("x.log"),
+            **self.hook("copyto", "x.log", b"line 1\ntheirs\n"),
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((self.root / "x.log").read_bytes(), b"line 1\ntheirs\nmine\n")
+
+    def test_append_never_shrinks(self):
+        # A log that shrinks between our reads is a truncation sign: stop.
+        self.put("x.log", b"line 1\nline 2\n")
+        rc, _, err = self.tool(
+            "append",
+            self.local("frag.txt", b"mine\n"),
+            self.r("x.log"),
+            **self.hook("cat", "x.log", b"line 1\n"),
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("shrank", err)
+        self.assertEqual((self.root / "x.log").read_bytes(), b"line 1\n")
+
+    def test_restore_refused_off_drive(self):
+        rc, _, err = self.tool("restore", f"t:{self.root}", "--id", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("Drive-only", err)
 
     # moveto (H2)
     def test_moveto_refuses_existing_destination(self):

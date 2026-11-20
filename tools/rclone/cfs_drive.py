@@ -5,17 +5,23 @@ Every read-modify-write of an existing CFS file on Google Drive goes through
 the Drive API (the rclone CLI), never through a FUSE mount such as ~/gdrive:
 a mount can serve a stale listing or a body cut to a stale size.
 
-Subcommands (all print one JSON line on success, exit 2 with REFUSED: on
-stderr when a guard fails, and never touch the remote after a guard fails):
+Subcommands print one JSON line on success. A guard failure exits 2 with
+REFUSED: on stderr; a guard that fails before the upload leaves the remote
+untouched. Exit 3 with CONFLICT: means that after our upload the remote held
+another writer's content: it is left as it is (never rolled back over).
 
   read REMOTE LOCAL [--state STATE]   rclone cat into LOCAL; STATE records
                                       id/size/md5/modtime for a later write
   write LOCAL REMOTE (--base STATE | --expect-md5 MD5 | --create)
                                       validate, compare-and-swap, copyto,
-                                      verify, roll back on a bad upload
+                                      verify; roll back only our own bad upload
+  append FRAGMENT REMOTE [--create]   read via the API, append, guarded write;
+                                      re-read and retry on a concurrent change
   moveto SRC DST                      rename one object; refuse if DST exists
   trash REMOTE [--id ID]              move one object to Drive trash and
                                       confirm it in the trash listing
+  restore REMOTE_DIR --id ID          bring a trashed object back under its
+                                      name (strips the .cfs-trash-<ID> suffix)
   lsjson REMOTE_DIR                   authoritative listing; refuse on
                                       same-name duplicates
 
@@ -31,8 +37,11 @@ import json
 import os
 import posixpath
 import subprocess  # noqa: S404 - rclone is the API client; argv lists only
+import shutil
 import sys
+import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 RCLONE = os.environ.get("CFS_DRIVE_RCLONE", "rclone")
@@ -42,6 +51,14 @@ TEXT_SUFFIXES = (".md", ".log", ".yaml", ".yml", ".txt", ".json", ".csv")
 
 class Refused(Exception):
     """A guard failed; the message says which and what state was left."""
+
+
+class Changed(Refused):
+    """The remote changed before our upload; nothing was written (retryable)."""
+
+
+class Conflict(Refused):
+    """After our upload the remote held another writer's content; left as is."""
 
 
 def run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -124,15 +141,16 @@ def emit(obj: dict) -> int:
     return 0
 
 
-def validate_body(local: str, data: bytes, binary: bool) -> None:
+def validate_body(local: str, data: bytes, binary: bool, text: bool = False) -> None:
     """All content checks run before anything is uploaded."""
     if not data:
         raise Refused(f"{local} is empty")
     if binary:
         return
-    if not local.endswith(TEXT_SUFFIXES):
+    if not text and not local.endswith(TEXT_SUFFIXES):
         raise Refused(
-            f"{local}: not a known text type; pass --binary to skip text checks"
+            f"{local}: not a known text type; pass --text (a text file without a "
+            "known suffix, e.g. a script) or --binary (skip text checks)"
         )
     try:
         data.decode("utf-8")
@@ -177,23 +195,82 @@ def cmd_read(remote: str, local: str, state_path: str | None) -> int:
     return emit({"read": remote, "local": local, **st})
 
 
-def cmd_write(
-    local: str,
+def parse_time(value: str | None) -> float | None:
+    """RFC 3339 from rclone (up to 9 fraction digits, Z or offset) -> epoch."""
+    if not value:
+        return None
+    v = value.replace("Z", "+00:00")
+    head, sep, frac = v.partition(".")
+    if sep:
+        digits = "".join(c for c in frac if c.isdigit())
+        tz = frac[len(digits) :]
+        v = f"{head}.{digits[:6].ljust(6, '0')}{tz}"
+    try:
+        return datetime.fromisoformat(v).timestamp()
+    except ValueError:
+        return None
+
+
+def own_upload(
+    remote: str, row: dict, data: bytes, mtime: float, cur_id: str | None
+) -> bool:
+    """True only if REMOTE still holds this run's own (possibly short) upload.
+
+    Ours means: same ID as before (when there was one), the modtime rclone set
+    from our upload file, and a body that is our bytes or a prefix of them.
+    Another writer's upload fails at least one of these.
+    """
+    if row.get("IsDir") or row["Size"] > len(data):
+        return False
+    if cur_id and row.get("ID") and row.get("ID") != cur_id:
+        return False
+    t = parse_time(row.get("ModTime"))
+    if t is None or abs(t - mtime) > 1.0:
+        return False
+    body = cat(remote)
+    if md5_of(row) and md5_bytes(body) != md5_of(row):
+        return False  # changed again while we looked
+    return data.startswith(body)
+
+
+def save_preimage(remote: str, cur: dict, pre: bytes, preimage_dir: str | None) -> Path:
+    """Always keep the replaced body: in DIR if given, else in a temp folder."""
+    d = (
+        Path(preimage_dir)
+        if preimage_dir
+        else Path(tempfile.mkdtemp(prefix="cfs-drive-pre-"))
+    )
+    d.mkdir(parents=True, exist_ok=True)
+    path = (
+        d
+        / f"{time.strftime('%Y%m%dT%H%M%S')}__{cur.get('ID') or 'noid'}__{split(remote)[1]}"
+    )
+    path.write_bytes(pre)
+    return path
+
+
+def copyto(src: str, dst: str) -> subprocess.CompletedProcess:
+    # --ignore-times: upload even when size and modtime happen to match
+    return run(["copyto", src, dst, "--ignore-times"], check=False)
+
+
+def write_core(
+    data: bytes,
+    upload: str,
+    mtime: float,
     remote: str,
+    label: str,
     base: dict | None,
     create: bool,
-    binary: bool,
     allow_shrink: bool,
     preimage_dir: str | None,
-) -> int:
-    data = Path(local).read_bytes()
-    validate_body(local, data, binary)
+) -> dict:
+    """Guarded upload of DATA (already validated, stored at UPLOAD with MTIME)."""
     want = {"size": len(data), "md5": md5_bytes(data)}
-
     cur = one_file(objects(remote), remote)
     if create:
         if cur is not None:
-            raise Refused(
+            raise Changed(
                 f"--create but {remote} already exists (id {cur.get('ID')}); read it and pass --base"
             )
     else:
@@ -204,18 +281,18 @@ def cmd_write(
         now = state_of(cur)
         for k in ("id", "md5", "size", "modtime"):
             if base.get(k) is not None and base[k] != now[k]:
-                raise Refused(
+                raise Changed(
                     f"{remote} changed since it was read: {k} {base[k]} -> {now[k]}; re-read and redo the edit"
                 )
         if not now["md5"]:
             raise Refused(f"{remote} has no md5 (Google-native file?); not supported")
         if want["size"] < now["size"] and not allow_shrink:
             raise Refused(
-                f"{local} ({want['size']} B) is smaller than {remote} ({now['size']} B); "
+                f"{label} ({want['size']} B) is smaller than {remote} ({now['size']} B); "
                 "a shrinking edit needs --allow-shrink (truncation guard)"
             )
         if want["md5"] == now["md5"]:
-            return emit({"remote": remote, "id": now["id"], "unchanged": True, **want})
+            return {"remote": remote, "id": now["id"], "unchanged": True, **want}
 
     pre_path = None
     pre_md5 = None
@@ -223,24 +300,17 @@ def cmd_write(
         pre = cat(remote)
         pre_md5 = md5_bytes(pre)
         if pre_md5 != md5_of(cur):
-            raise Refused(
+            raise Changed(
                 f"{remote}: pre-image md5 {pre_md5} != listed {md5_of(cur)}; nothing written"
             )
-        if preimage_dir:
-            d = Path(preimage_dir)
-            d.mkdir(parents=True, exist_ok=True)
-            pre_path = (
-                d
-                / f"{time.strftime('%Y%m%dT%H%M%S')}__{cur.get('ID') or 'noid'}__{split(remote)[1]}"
-            )
-            pre_path.write_bytes(pre)
+        pre_path = save_preimage(remote, cur, pre, preimage_dir)
         # last check, immediately before the upload
         if state_of(one_file(objects(remote), remote)) != state_of(cur):
-            raise Refused(
+            raise Changed(
                 f"{remote} changed during the write preparation; nothing written"
             )
 
-    up = run(["copyto", local, remote], check=False)
+    up = copyto(upload, remote)
     after = objects(remote)
     problem = None
     if up.returncode != 0:
@@ -254,28 +324,175 @@ def cmd_write(
         elif cur is not None and got["id"] != cur.get("ID"):
             problem = f"id changed {cur.get('ID')} -> {got['id']}"
     if problem is None:
-        return emit(
-            {
-                "remote": remote,
-                "id": after[0].get("ID"),
-                "preimage": str(pre_path) if pre_path else None,
-                "preimage_md5": pre_md5,
-                **want,
-            }
-        )
+        return {
+            "remote": remote,
+            "id": after[0].get("ID"),
+            "preimage": str(pre_path) if pre_path else None,
+            "preimage_md5": pre_md5,
+            **want,
+        }
 
-    # Roll back to the pre-image when there was one and the name is still single.
-    note = "no pre-image (new file); check the remote by hand"
-    if cur is not None and len(after) == 1 and md5_of(after[0]) == pre_md5:
-        note = "remote still holds the pre-image; nothing to roll back"
-    elif cur is not None and pre_path is not None and len(after) <= 1:
-        rb = run(["copyto", str(pre_path), remote], check=False)
-        chk = objects(remote)
-        ok = rb.returncode == 0 and len(chk) == 1 and md5_of(chk[0]) == pre_md5
-        note = f"rolled back to pre-image {pre_path}: {'verified' if ok else 'FAILED, fix by hand'}"
-    elif cur is not None:
-        note = f"NOT rolled back (no --preimage-dir or duplicates); pre-image md5 {pre_md5}"
-    raise Refused(f"{remote}: {problem}; {note}")
+    keep = (
+        f"pre-image kept at {pre_path} (md5 {pre_md5})"
+        if pre_path
+        else "new file, no pre-image"
+    )
+    if len(after) > 1:
+        raise Refused(f"{remote}: {problem}; NOT rolled back (duplicate names); {keep}")
+    if not after:
+        raise Refused(f"{remote}: {problem}; the name is gone; NOT rolled back; {keep}")
+    row = after[0]
+    if cur is not None and md5_of(row) == pre_md5:
+        raise Refused(
+            f"{remote}: {problem}; remote still holds the pre-image; nothing to roll back"
+        )
+    if not own_upload(remote, row, data, mtime, cur.get("ID") if cur else None):
+        raise Conflict(
+            f"{remote}: {problem}; the remote now holds {row['Size']} B {md5_of(row)} "
+            f"(modtime {row.get('ModTime')}), which is neither this upload nor the pre-image: "
+            f"another writer's edit. NOT rolled back; {keep}; re-read and redo the edit"
+        )
+    if cur is None or pre_path is None:
+        raise Refused(
+            f"{remote}: {problem}; it holds our own bad upload of a new file; fix by hand"
+        )
+    # Compare-and-swap before the rollback too: only replace our own upload.
+    if state_of(one_file(objects(remote), remote)) != state_of(row):
+        raise Conflict(
+            f"{remote}: {problem}; changed again before rollback; NOT rolled back; {keep}"
+        )
+    rb = copyto(str(pre_path), remote)
+    chk = objects(remote)
+    ok = rb.returncode == 0 and len(chk) == 1 and md5_of(chk[0]) == pre_md5
+    raise Refused(
+        f"{remote}: {problem}; our own bad upload was rolled back to pre-image {pre_path}: "
+        f"{'verified' if ok else 'FAILED, fix by hand'}"
+    )
+
+
+def cmd_write(
+    local: str,
+    remote: str,
+    base: dict | None,
+    create: bool,
+    binary: bool,
+    text: bool,
+    allow_shrink: bool,
+    preimage_dir: str | None,
+) -> int:
+    data = Path(local).read_bytes()
+    validate_body(local, data, binary, text)
+    mtime = Path(local).stat().st_mtime
+    return emit(
+        write_core(
+            data, local, mtime, remote, local, base, create, allow_shrink, preimage_dir
+        )
+    )
+
+
+def read_state(remote: str) -> tuple[bytes, dict] | None:
+    """Consistent API read: (body, state), or None when the name is absent."""
+    before = one_file(objects(remote), remote)
+    if before is None:
+        return None
+    data = cat(remote)
+    st = state_of(before)
+    if state_of(one_file(objects(remote), remote)) != st or len(data) != st["size"]:
+        raise Changed(f"{remote} changed while reading")
+    if st["md5"] and md5_bytes(data) != st["md5"]:
+        raise Changed(f"{remote}: download md5 differs from the listing")
+    return data, st
+
+
+def check_growth(remote: str, seen: int, size: int) -> int:
+    if size < seen:
+        raise Refused(
+            f"{remote} shrank from {seen} B to {size} B between reads; "
+            "not appending (possible truncation)"
+        )
+    return size
+
+
+def cmd_append(
+    fragment: str,
+    remote: str,
+    create: bool,
+    text: bool,
+    retries: int,
+    preimage_dir: str | None,
+) -> int:
+    frag = Path(fragment).read_bytes()
+    # the fragment must be clean text; the type check uses the remote's name
+    validate_body(split(remote)[1], frag, False, text)
+    work = Path(tempfile.mkdtemp(prefix="cfs-drive-append-"))
+    try:
+        first = one_file(objects(remote), remote)
+        seen = first["Size"] if first else 0  # a log must never get shorter
+        last = ""
+        got = None
+        body = b""
+        for attempt in range(1, retries + 2):
+            if attempt > 1:
+                time.sleep(min(8.0, 0.5 * 2 ** (attempt - 2)))
+            try:
+                got = read_state(remote)
+                if got is None:
+                    if not create:
+                        raise Refused(
+                            f"{remote} does not exist; pass --create to start it"
+                        )
+                    body, base, new = b"", None, frag
+                else:
+                    body, base = got
+                    seen = check_growth(remote, seen, len(body))
+                    if body and not body.endswith(b"\n"):
+                        raise Refused(
+                            f"{remote} does not end with a newline (possible truncation); "
+                            "not appending: check it first"
+                        )
+                    new = body + frag
+                up = work / split(remote)[1]
+                up.write_bytes(new)
+                mtime = time.time()
+                os.utime(up, (mtime, mtime))
+                res = write_core(
+                    new,
+                    str(up),
+                    mtime,
+                    remote,
+                    fragment,
+                    base,
+                    base is None,
+                    False,
+                    preimage_dir,
+                )
+                return emit({**res, "appended": len(frag), "attempts": attempt})
+            except (Changed, Conflict) as e:
+                last = str(e)
+                # Our upload may have landed and been appended to since: done if so.
+                try:
+                    now = read_state(remote)
+                except Changed:
+                    now = None
+                if now is not None:
+                    seen = check_growth(remote, seen, len(now[0]))
+                if now is not None and now[0].startswith(body + frag):
+                    return emit(
+                        {
+                            "remote": remote,
+                            "id": now[1]["id"],
+                            "appended": len(frag),
+                            "attempts": attempt,
+                            "note": "landed; later appends followed",
+                            **now[1],
+                        }
+                    )
+                continue
+        raise Refused(
+            f"{remote}: append not done after {retries + 1} attempts; last: {last}"
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def cmd_moveto(src: str, dst: str) -> int:
@@ -367,6 +584,69 @@ def cmd_trash(remote: str, want_id: str | None) -> int:
     return emit({"trashed": remote, "trashed_as": path, "in_trash": in_trash, **st})
 
 
+TRASH_SUFFIX = ".cfs-trash-"
+
+
+def cmd_restore(remote_dir: str, want_id: str, name: str | None) -> int:
+    """Bring one trashed object back into REMOTE_DIR under its original name.
+
+    `rclone backend untrash` restores everything trashed in a folder (filters
+    are ignored), so the object is first moved by ID into a fresh empty folder,
+    untrashed there, then moved back by ID. A `trash --id` name suffix
+    (`<name>.cfs-trash-<ID>`) is stripped. Also renames an object that was
+    already restored by hand (e.g. from the Drive web UI).
+    """
+    remote_dir = remote_dir.rstrip("/")
+    if remote_type(remote_dir) != "drive":
+        raise Refused(f"{remote_dir} is not a Drive remote; restore is Drive-only")
+    root = remote_dir.partition(":")[0] + ":"
+    live = [r for r in list_dir(remote_dir) if r.get("ID") == want_id]
+    trashed = [r for r in list_dir(remote_dir, trashed=True) if r.get("ID") == want_id]
+    if live and live[0].get("IsDir") or trashed and trashed[0].get("IsDir"):
+        raise Refused(f"{want_id} is a folder; restore folders by hand")
+    if not live and not trashed:
+        raise Refused(f"{want_id} is neither in {remote_dir} nor in its trash listing")
+    row = (live or trashed)[0]
+    st = state_of(row)
+    cur_name = row["Name"]
+    target = name or cur_name
+    sfx = f"{TRASH_SUFFIX}{want_id}"
+    if name is None and cur_name.endswith(sfx):
+        target = cur_name[: -len(sfx)]
+    dst = f"{remote_dir}/{target}"
+    clash = [r.get("ID") for r in objects(dst) if r.get("ID") != want_id]
+    untrashed = False
+    if not live:
+        tmp = f"{remote_dir}/.cfs-restore-{want_id}"
+        if list_dir(tmp) or list_dir(tmp, trashed=True):
+            raise Refused(f"{tmp} already exists; clean it up first")
+        run(["mkdir", tmp])
+        run(["backend", "moveid", root, want_id, f"{tmp}/{cur_name}"])
+        inside = list_dir(tmp, trashed=True)
+        if [r.get("ID") for r in inside] != [want_id]:
+            raise Refused(
+                f"{tmp} trash holds {[r.get('ID') for r in inside]}, expected only {want_id}; not untrashing"
+            )
+        res = json.loads(run(["backend", "untrash", tmp]).stdout or "{}")
+        if res.get("Untrashed") != 1 or res.get("Errors"):
+            raise Refused(f"untrash in {tmp} returned {res}; check by hand")
+        untrashed = True
+        final = dst if not clash else f"{remote_dir}/{cur_name}"
+        run(["backend", "moveid", root, want_id, final])
+        run(["rmdir", tmp])
+    elif not clash and cur_name != target:
+        run(["backend", "moveid", root, want_id, dst])
+    where = dst if not clash else f"{remote_dir}/{cur_name}"
+    got = [r for r in objects(where) if r.get("ID") == want_id]
+    if len(got) != 1 or md5_of(got[0]) != st["md5"] or got[0]["Size"] != st["size"]:
+        raise Refused(f"{want_id} not confirmed at {where} after restore ({got})")
+    if clash:
+        raise Refused(
+            f"{dst} already exists ({clash}); {want_id} is restored but left as {where}: merge by hand"
+        )
+    return emit({"restored": dst, "untrashed": untrashed, "from_name": cur_name, **st})
+
+
 def cmd_lsjson(remote_dir: str) -> int:
     rows = list_dir(remote_dir)
     print(json.dumps(rows, indent=2))
@@ -410,14 +690,39 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument(
         "--allow-shrink", action="store_true", help="allow the new body to be smaller"
     )
-    w.add_argument(
+    kind = w.add_mutually_exclusive_group()
+    kind.add_argument(
         "--binary",
         action="store_true",
         help="skip text checks (UTF-8, trailing newline)",
     )
-    w.add_argument(
-        "--preimage-dir", help="save the replaced body here (enables rollback)"
+    kind.add_argument(
+        "--text",
+        action="store_true",
+        help="run the text checks on a file without a known text suffix (e.g. a script)",
     )
+    w.add_argument(
+        "--preimage-dir",
+        help="save the replaced body here (default: a temp folder; always kept for rollback)",
+    )
+    ap = sub.add_parser(
+        "append",
+        help="append FRAGMENT to REMOTE via the API (logs); retries on conflict",
+    )
+    ap.add_argument(
+        "fragment", help="local file with the lines to append (ends with a newline)"
+    )
+    ap.add_argument("remote")
+    ap.add_argument(
+        "--create", action="store_true", help="start REMOTE if it does not exist"
+    )
+    ap.add_argument(
+        "--text", action="store_true", help="REMOTE has no known text suffix"
+    )
+    ap.add_argument(
+        "--retries", type=int, default=5, help="re-read and retry this many times"
+    )
+    ap.add_argument("--preimage-dir", help="save each replaced body here")
     m = sub.add_parser("moveto", help="rclone moveto SRC DST; refuse if DST exists")
     m.add_argument("src")
     m.add_argument("dst")
@@ -425,6 +730,14 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("remote")
     t.add_argument(
         "--id", help="Drive ID to trash; required when the name is duplicated"
+    )
+    rs = sub.add_parser(
+        "restore", help="untrash one object by ID and give it back its name"
+    )
+    rs.add_argument("remote_dir", help="the folder the object was trashed from")
+    rs.add_argument("--id", required=True)
+    rs.add_argument(
+        "--name", help="restore under this name (default: strip .cfs-trash-<ID>)"
     )
     ls = sub.add_parser(
         "lsjson", help="list a folder via the API; refuse on duplicate names"
@@ -441,15 +754,25 @@ def main(argv: list[str] | None = None) -> int:
                 load_base(a),
                 a.create,
                 a.binary,
+                a.text,
                 a.allow_shrink,
                 a.preimage_dir,
             )
+        if a.cmd == "append":
+            return cmd_append(
+                a.fragment, a.remote, a.create, a.text, a.retries, a.preimage_dir
+            )
+        if a.cmd == "restore":
+            return cmd_restore(a.remote_dir, a.id, a.name)
         if a.cmd == "moveto":
             return cmd_moveto(a.src, a.dst)
         if a.cmd == "trash":
             return cmd_trash(a.remote, a.id)
         if a.cmd == "lsjson":
             return cmd_lsjson(a.remote_dir)
+    except Conflict as e:
+        print(f"CONFLICT: {e}", file=sys.stderr)
+        return 3
     except Refused as e:
         print(f"REFUSED: {e}", file=sys.stderr)
         return 2
